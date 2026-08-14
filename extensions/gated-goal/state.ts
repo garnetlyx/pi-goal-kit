@@ -71,7 +71,6 @@ export function save(ctx: ExtensionContext, state: GatedGoalState): void {
 	fs.mkdirSync(path.dirname(filePath(sessionId)), { recursive: true, mode: 0o700 });
 	fs.writeFileSync(filePath(sessionId), JSON.stringify(state, null, 2), { mode: 0o600 });
 }
-}
 
 export function hashPrompt(prompt: string): string {
 	return crypto.createHash("sha256").update(prompt, "utf8").digest("hex");
