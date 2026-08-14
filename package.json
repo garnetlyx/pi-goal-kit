@@ -1,7 +1,7 @@
 {
   "name": "pi-goal-kit",
   "version": "0.1.0",
-  "description": "A wait-aware extension set for Pi: gated-goal plan-act-review loop, subagent delegation, todo tracking, and reminder hooks.",
+  "description": "Goal-gated workflow extensions for Pi: the gated-goal plan-act-review loop, subagent delegation, todo nudges, and agent-authored wait conditions.",
   "type": "module",
   "license": "MIT",
   "keywords": ["pi-package"],

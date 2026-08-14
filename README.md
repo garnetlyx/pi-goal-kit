@@ -1,11 +1,11 @@
 # pi-goal-kit
 
-**Goal-gated workflow for [Pi](https://pi.dev)** — four cooperating
-extensions. The design center is
-**gated-goal**: a five-phase loop that pins the acceptance bar out of the
-agent's reach, keeps it self-driving mid-task, and gates completion behind an
-adversarial review. The other three (`reminder-hook`, `todo`, `subagent`)
-are useful standalone, and together they form the substrate gated-goal runs on.
+**Goal-gated workflow for [Pi](https://pi.dev)** — four cooperating extensions.
+The design center is **gated-goal**: a five-phase loop that pins the acceptance
+bar out of the agent's reach, keeps it self-driving mid-task, and gates
+completion behind an adversarial review. The other three (`reminder-hook`,
+`todo`, `subagent`) are useful standalone, and together they form the substrate
+gated-goal runs on.
 
 Two ideas run through all four:
 
