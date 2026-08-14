@@ -1,5 +1,5 @@
 {
-  "name": "pi-gated-goal",
+  "name": "pi-agents-goal-workflow",
   "version": "0.1.0",
   "description": "A wait-aware extension set for Pi: gated-goal plan-act-review loop, subagent delegation, todo tracking, and reminder hooks.",
   "type": "module",
