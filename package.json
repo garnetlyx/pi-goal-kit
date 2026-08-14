@@ -5,7 +5,29 @@
   "type": "module",
   "license": "MIT",
   "keywords": ["pi-package"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/garnetlyx/pi-agents-goal-workflow.git"
+  },
+  "homepage": "https://github.com/garnetlyx/pi-agents-goal-workflow",
+  "bugs": {
+    "url": "https://github.com/garnetlyx/pi-agents-goal-workflow/issues"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit"
+  },
   "pi": {
     "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
   }
 }

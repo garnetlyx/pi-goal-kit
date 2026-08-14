@@ -34,8 +34,8 @@ pi install git:github.com/garnetlyx/pi-agents-goal-workflow@<tag>
 pi install -l git:github.com/garnetlyx/pi-agents-goal-workflow
 ```
 
-Pi auto-discovers `extensions/*/index.ts`. None are auto-enabled — turn them on
-with `pi config`.
+Pi auto-discovers `extensions/*/index.ts` and enables them by default after
+install. Use `pi config` to disable any you don't want.
 
 ## The extensions (simple → complex)
 
@@ -149,11 +149,16 @@ the bundle and both the wait-aware nudge and the adversarial review break.
 
 ## Manual setup
 
+If you prefer to manage the checkout yourself (or are contributing), clone it
+and link each extension into Pi's agent directory:
+
 ```bash
 git clone https://github.com/garnetlyx/pi-agents-goal-workflow.git
+CLONE_DIR="$PWD/pi-agents-goal-workflow"
 AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+mkdir -p "$AGENT_DIR/extensions"
 for e in gated-goal subagent todo reminder-hook; do
-  ln -s "$PWD/pi-agents-goal-workflow/extensions/$e" "$AGENT_DIR/extensions/$e"
+  ln -s "$CLONE_DIR/extensions/$e" "$AGENT_DIR/extensions/$e"
 done
 ```
 
@@ -162,8 +167,10 @@ they follow whatever `pi` itself is using.
 
 ## Requirements
 
-[Pi](https://pi.dev). Depends only on Pi's own runtime types
-(`@earendil-works/pi-coding-agent`, `typebox`) — no extra npm packages.
+[Pi](https://pi.dev) **0.84.1 or later**. Depends only on Pi's own runtime
+types (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`,
+`@earendil-works/pi-tui`, `typebox`) — no extra npm packages. Consumers do not
+need to install these; `pi` resolves them at load time.
 
 ## License
 

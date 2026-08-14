@@ -76,10 +76,13 @@ function loadReminders(sessionId: string): Reminder[] {
 	}
 }
 function saveReminders(cwd: string, sessionId: string, reminders: Reminder[]): void {
+	// Reminder messages, predicates, and project paths may contain private
+	// task content. Restrict file + dir to owner only (mode is masked by
+	// umask, so 0o600 yields 0o600 under the default 0o22).
 	const dir = stateDir(sessionId);
-	fs.mkdirSync(dir, { recursive: true });
+	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 	const store: ReminderStore = { originalCwd: cwd, reminders };
-	fs.writeFileSync(stateFile(sessionId), JSON.stringify(store, null, 2));
+	fs.writeFileSync(stateFile(sessionId), JSON.stringify(store, null, 2), { mode: 0o600 });
 }
 
 function notifySystem(title: string, body: string): void {

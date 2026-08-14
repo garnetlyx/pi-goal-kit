@@ -66,8 +66,11 @@ export function save(ctx: ExtensionContext, state: GatedGoalState): void {
 	// moved / mounted elsewhere) is detectable instead of silently using
 	// stale-path assumptions.
 	if (!state.originalCwd) state.originalCwd = ctx.cwd;
-	fs.mkdirSync(path.dirname(filePath(sessionId)), { recursive: true });
-	fs.writeFileSync(filePath(sessionId), JSON.stringify(state, null, 2));
+	// Frozen plans contain task instructions and may reference private
+	// project content. Restrict file + dir to owner only.
+	fs.mkdirSync(path.dirname(filePath(sessionId)), { recursive: true, mode: 0o700 });
+	fs.writeFileSync(filePath(sessionId), JSON.stringify(state, null, 2), { mode: 0o600 });
+}
 }
 
 export function hashPrompt(prompt: string): string {

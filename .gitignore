@@ -1,3 +1,29 @@
+# Dependencies
 node_modules/
-*.log
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Environment / local config
+.env
+.env.*
+!.env.example
+*.local
+
+# Credentials / keys — never commit
+*.pem
+*.key
+id_rsa
+id_ed25519
+auth.json
+settings.json
+
+# Editor / OS
 .DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Logs
+*.log
