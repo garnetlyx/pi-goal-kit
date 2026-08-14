@@ -1,9 +1,9 @@
 # pi-agents-goal-workflow
 
 Four cooperating extensions for [Pi](https://pi.dev). The design center is
-**gated-goal**: a five-phase loop that freezes the acceptance bar against
-tampering, keeps the agent self-driving mid-task, and gates completion behind
-an adversarial review. The other three (`reminder-hook`, `todo`, `subagent`)
+**gated-goal**: a five-phase loop that pins the acceptance bar out of the
+agent's reach, keeps it self-driving mid-task, and gates completion behind an
+adversarial review. The other three (`reminder-hook`, `todo`, `subagent`)
 are useful standalone, and together they form the substrate gated-goal runs on.
 
 Two ideas run through all four:
@@ -13,9 +13,10 @@ Two ideas run through all four:
   condition is a shell predicate the agent writes, the subagent role need not
   exist in any config file. Config supplies defaults; the agent decides at call
   time. The same four extensions cover scenarios they were never written for.
-- **Distill what actually drives a task, then defend it.** Pin the requirement,
-  nail the acceptance gate shut against tampering (frozen sha256), self-drive
-  the middle instead of stalling, and let subagents do double duty —
+- **Distill what actually drives a task, then defend it.** Pin the requirement
+  outside the conversation so it can't be quietly relaxed, hash it (sha256) so
+  drift is detectable, self-drive the middle instead of stalling, and let
+  subagents do double duty —
   **collaboration** for parallel throughput *and* **adversarial QA**, a reviewer
   whose incentive is to find gaps rather than agree.
 
@@ -61,7 +62,7 @@ This one stays silent while any wait is active.
 
 **subagent** — delegates a self-contained task to a model in a separate `pi`
 subprocess with its own context, tool whitelist, and timeout. User config
-(`~/.pi/agent/subagent.json`) holds reusable role *suggestions*, not a gate:
+(`subagent.json` in Pi's agent directory) holds reusable role *suggestions*, not a gate:
 mid-session the agent can improvise a role or model that appears in no config
 file (the task calls for it, or today's suggested model is down), and always
 states `model`, `permissions`, and `timeout` explicitly per call — the
@@ -87,44 +88,49 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │ → frozen prompt hashed + persisted
                                    │ → todos created (via followUp instruction)
                                    ▼
-                                 P3 act  ◄──────────────────┐
-                                   │ agent works the todos    │
-                                   │ on agent_settled:        │
-                                   │   all todos done?        │
-                                   │     ├─ no  → stay P3     │
-                                   │     │   (todo ext nudges)│
-                                   │     └─ yes → P4          │
-                                   ▼                          │
-                                 P4 review                    │
-                                   │ spawn reviewer subagent  │
-                                   │   (frozen prompt + hash) │
-                                   │ parse output:            │
-                                   │   <promise>DONE</promise>│
-                                   │     ├─ yes → P5          │
-                                   │     │                    │
-                                   │     └─ no  → edits ──────┤
-                                   │              reviewsCompleted++
-                                   │              >= maxIter? ─► exit: max iteration reached
-                                   ▼                          │
-                                 P5 verify                    │
-                                   │ main agent re-runs       │
-                                   │   frozen verification    │
-                                   │   itself, judges output  │
-                                   │   subjectively           │
+                                 P3 act  ◄───────────────────┐
+                                   │ agent works the todos   │
+                                   │ on agent_settled:       │
+                                   │   all todos done?       │
+                                   │     ├─ no  → stay P3    │
+                                   │     │  (todo ext nudges)│
+                                   │     └─ yes → P4         │
+                                   ▼                         │
+                                 P4 review                   │
+                                   │ spawn reviewer subagent │
+                                   │   (frozen prompt + hash)│
+                                   │ reviewsCompleted++ on   │
+                                   │   EITHER verdict — a    │
+                                   │   review that ran is    │
+                                   │   a spent iteration     │
+                                   │ >= maxIter? ─► exit: max iteration reached
+                                   │ <promise>DONE</promise>?
+                                   │     ├─ no → edits ──────┤
+                                   │     └─ yes → P5         │
+                                   ▼                         │
+                                 P5 verify                   │
+                                   │ main agent re-runs the  │
+                                   │   frozen verification   │
+                                   │   itself, judges output │
+                                   │   subjectively          │
                                    │   ├─ confirm_done ─► exit: done
-                                   │   └─ reject_done ────────┘
-                                   │      reviewsCompleted++
-                                   │      >= maxIter? ─► exit: max iteration reached
-                                   (loop back to P3 ACT)
+                                   │   └─ reject_done ───────┘
+                                   │      (no extra charge — P4
+                                   │       already spent this one)
 ```
 
-P4's reviewer is read-only and cannot edit the work; P5 makes the main agent
-re-run the frozen verification itself. The second gate exists because
-end-to-end testing caught a reviewer rubber-stamping work that provably failed
-its own frozen verification. Iteration is symmetric — "reviewer not satisfied"
-and "main agent rejected a rubber-stamp" cost the same. Full transition rules,
-hash integrity, and iteration accounting:
+P4's reviewer gets no write or edit tools; P5 makes the main agent re-run the
+frozen verification itself. The second gate exists because end-to-end testing
+caught a reviewer rubber-stamping work that provably failed its own frozen
+verification. Iteration is symmetric — the counter is charged when a review
+completes, whatever its verdict, so "reviewer not satisfied" and "reviewer said
+DONE, main agent rejected it" cost the same. Full transition rules, hash
+integrity, and iteration accounting:
 [`gated-goal/docs/DESIGN.md`](extensions/gated-goal/docs/DESIGN.md).
+
+One caveat worth stating plainly: the reviewer's tool whitelist includes
+`bash`, which is not sandboxed. Withholding write/edit tools plus an explicit
+instruction is a strong default, not an enforced boundary.
 
 ## How they cooperate
 
@@ -145,10 +151,14 @@ the bundle and both the wait-aware nudge and the adversarial review break.
 
 ```bash
 git clone https://github.com/garnetlyx/pi-agents-goal-workflow.git
+AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 for e in gated-goal subagent todo reminder-hook; do
-  ln -s "$PWD/pi-agents-goal-workflow/extensions/$e" ~/.pi/agent/extensions/$e
+  ln -s "$PWD/pi-agents-goal-workflow/extensions/$e" "$AGENT_DIR/extensions/$e"
 done
 ```
+
+All four resolve their own config and state under that same agent directory, so
+they follow whatever `pi` itself is using.
 
 ## Requirements
 

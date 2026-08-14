@@ -31,35 +31,35 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │ → frozen prompt hashed + persisted
                                    │ → todos created (via followUp instruction)
                                    ▼
-                                 P3 act  ◄──────────────────┐
-                                   │ agent works the todos    │
-                                   │ on agent_settled:        │
-                                   │   all todos done?        │
-                                   │     ├─ no  → stay P3     │
-                                   │     │   (todo ext nudges)│
-                                   │     └─ yes → P4          │
-                                   ▼                          │
-                                 P4 review                    │
-                                   │ spawn reviewer subagent  │
-                                   │   (frozen prompt + hash) │
-                                   │ parse output:            │
-                                   │   <promise>DONE</promise>│
-                                   │     ├─ yes → P5          │
-                                   │     │                    │
-                                   │     └─ no  → edits ──────┤
-                                   │              reviewsCompleted++
-                                   │              >= maxIter? ─► exit: max iteration reached
-                                   ▼                          │
-                                 P5 verify                    │
-                                   │ main agent re-runs       │
-                                   │   frozen verification    │
-                                   │   itself, judges output  │
-                                   │   subjectively           │
+                                 P3 act  ◄───────────────────┐
+                                   │ agent works the todos   │
+                                   │ on agent_settled:       │
+                                   │   all todos done?       │
+                                   │     ├─ no  → stay P3    │
+                                   │     │  (todo ext nudges)│
+                                   │     └─ yes → P4         │
+                                   ▼                         │
+                                 P4 review                   │
+                                   │ spawn reviewer subagent │
+                                   │   (frozen prompt + hash)│
+                                   │ reviewsCompleted++ on   │
+                                   │   EITHER verdict — a    │
+                                   │   review that ran is    │
+                                   │   a spent iteration     │
+                                   │ >= maxIter? ─► exit: max iteration reached
+                                   │ <promise>DONE</promise>?
+                                   │     ├─ no → edits ──────┤
+                                   │     └─ yes → P5         │
+                                   ▼                         │
+                                 P5 verify                   │
+                                   │ main agent re-runs the  │
+                                   │   frozen verification   │
+                                   │   itself, judges output │
+                                   │   subjectively          │
                                    │   ├─ confirm_done ─► exit: done
-                                   │   └─ reject_done ────────┘
-                                   │      reviewsCompleted++
-                                   │      >= maxIter? ─► exit: max iteration reached
-                                   (loop back to P3 ACT)
+                                   │   └─ reject_done ───────┘
+                                   │      (no extra charge — P4
+                                   │       already spent this one)
 ```
 
 Two exit-success paths converge at `confirm_done`. Three abort paths:
@@ -72,10 +72,13 @@ manual `/gated-goal-exit`.
 |------|---------|
 | `extensions/gated-goal/index.ts` | `/gated-goal`, `/gated-goal-exit`, `/gated-goal-status` commands; `freeze_plan`, `confirm_done`, `reject_done` tools; `agent_settled` P3→P4 transition; `extractSection` helper |
 | `extensions/gated-goal/reviewer.ts` | `pingReviewer` (P1 connectivity probe) + `runReview` (P4 spawn with hash verify + promise parse) |
-| `extensions/gated-goal/state.ts` | load/save `state/agent/gated-goal.json`; phase types (`idle|plan|act|review|verify`); frozen-prompt hashing; integrity check |
-| `skills/gated-goal/SKILL.md` | agent-facing phase guide |
+| `extensions/gated-goal/state.ts` | load/save the session state file; phase types (`idle|plan|act|review|verify`); frozen-prompt hashing; integrity check |
+| `extensions/gated-goal/SKILL.md` | agent-facing phase guide |
 
-## Persisted state (`state/agent/gated-goal.json`)
+## Persisted state (`<agent dir>/gated-goal/sessions/<sessionId>/state.json`)
+
+`<agent dir>` is Pi's agent directory, resolved via `getAgentDir()` — never
+hardcoded, since it differs between a stock install and a bundled one.
 
 ```json
 {
@@ -86,22 +89,31 @@ manual `/gated-goal-exit`.
   "reviewerPermissions": ["read", "grep", "find", "ls", "bash"],
   "frozenPrompt": "## Outcome\n...\n## Verification\n...\n## Constraints\n...\n## Code Quality Requirements\n...",
   "frozenHash": "<sha256 of frozenPrompt>",
-  "startedAt": 1785300000000
+  "startedAt": 1785300000000,
+  "originalCwd": "/path/to/project/when/the/run/started"
 }
 ```
 
 - `phase` drives every transition; `agent_settled` and the tools all branch on it.
-- `reviewsCompleted` increments on every non-DONE review AND every `reject_done`.
-  So both kinds of "this iteration didn't close the loop" consume budget
-  symmetrically. `maxIteration` caps both.
+- `reviewsCompleted` increments once per completed review, on either verdict, so
+  both kinds of "this iteration didn't close the loop" consume budget
+  symmetrically. See [Iteration accounting](#iteration-accounting).
 - `frozenPrompt` is the canonical four-section plan; `frozenHash` is its sha256.
-- `reviewerPermissions` is fixed at `["read","grep","find","ls","bash"]` —
-  reviewer can run tests/git but cannot edit. It is a subagent, so it also
-  inherits `PI_SUBAGENT_CHILD=1` and cannot dispatch sub-subagents.
+- `reviewerPermissions` is fixed at `["read","grep","find","ls","bash"]` — the
+  reviewer gets no write/edit tools and is instructed to use bash for
+  inspection only (tests, build, `git diff`). Note that bash is not sandboxed,
+  so this is an instruction rather than an enforced boundary. Being a subagent,
+  it also inherits `PI_SUBAGENT_CHILD=1` and cannot dispatch sub-subagents.
+
+- `originalCwd` is captured on first save. If a later session loads the state
+  from a different `ctx.cwd` (project moved or mounted elsewhere) while a run
+  is active, the extension warns that file paths in the frozen plan may need
+  reinterpretation — the plan itself stays valid.
 
 `load()` merges persisted state over a safe `EMPTY` default so missing fields
 never crash. `save()` writes atomically enough for this use (single writer).
-`clear()` removes the file on exit.
+Exiting sets `phase: "idle"` and records `exitReason` rather than deleting the
+file, so the last run stays inspectable.
 
 ## Commands
 
@@ -169,17 +181,20 @@ message.
 
 Parameter: required `reason`.
 
-Valid only while `phase === "verify"`. Increments `reviewsCompleted`; if that
-hits `maxIteration` → `exitGate("max iteration reached")`. Else flips to
-`phase === "act"` and followUps the reason back as feedback ("you rejected the
-reviewer's DONE as a rubber-stamp ... apply the fix, then stop").
+Valid only while `phase === "verify"`. Flips to `phase === "act"` and followUps
+the reason back as feedback ("you rejected the reviewer's DONE as a
+rubber-stamp ... apply the fix, then stop").
+
+It does **not** touch `reviewsCompleted`: reaching VERIFY already charged the
+iteration in P4, so incrementing here would double-count. The cap is re-checked
+when the next review completes.
 
 ## Reviewer (`reviewer.ts`)
 
 `runReview` and `pingReviewer` both reuse the subagent stack
 (`scheduler.ts` registry + `runner.ts` `runChild`). Each reviewer:
 
-- is added to the registry → appears in `/subagents` with preset `"reviewer"`
+- is added to the registry → appears in `/subagents` with role `"reviewer"`
 - emits `wait:active` on registry add, `wait:done` in a `finally` → the todo
   extension's nudge stays silent while a review runs
 - spawns with `PI_SUBAGENT_CHILD=1` (set by `runChild`) → **cannot dispatch**
@@ -223,8 +238,19 @@ else:
 ```
 
 `allTodosDone(ctx)` scans the current session branch for the latest `todo`
-tool result and checks every item is `done`. If there are no todos at all it
-returns false — you cannot review what was never planned.
+tool result and checks every item is `done`.
+
+If the branch contains no `todo` result at all, it falls back to
+`frozenHash && reviewsCompleted > 0`:
+
+- **Before the first review** that is false — you cannot review what was never
+  planned, so a run whose agent never created the todos stalls in ACT until
+  the user nudges it.
+- **After a review has already run** it is true. This is the restart-recovery
+  case: the todo list lives in the pre-restart session branch and is no longer
+  visible here, but the work had already been judged complete enough to enter
+  review once. Treating it as "todos done" lets the recovery nudge re-trigger a
+  fresh review instead of deadlocking with no reachable todo state.
 
 This single rule covers both the first P3 pass and re-entry after review
 feedback: if the main agent doesn't reopen todos, they stay all-done, so the
@@ -233,10 +259,15 @@ keeps the loop spinning without special-casing.
 
 ## Iteration accounting
 
-Both "reviewer not satisfied" and "main agent rejected rubber-stamp" increment
-`reviewsCompleted`. Before each return-to-P3, `reviewsCompleted >= maxIteration`
-→ exit "max iteration reached". So `maxIteration = N` permits up to N total
-non-closing iterations across both kinds.
+`reviewsCompleted` is charged in exactly one place: when a review finishes, for
+**either** verdict. A review that ran is a spent iteration regardless of what it
+concluded, so "reviewer not satisfied" and "reviewer said DONE, main agent then
+rejected it" cost the same. `reject_done` deliberately adds nothing on top.
+
+Immediately after each increment, `reviewsCompleted >= maxIteration` → exit
+"max iteration reached". On the DONE path this check runs *before* handing off
+to VERIFY, so the agent never burns a turn verifying a run that is already out
+of budget. `maxIteration = N` therefore permits up to N reviews.
 
 ## Cross-extension cooperation
 

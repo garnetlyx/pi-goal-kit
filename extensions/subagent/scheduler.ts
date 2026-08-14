@@ -32,7 +32,7 @@ export interface DispatchEntry {
 	exitCode?: number;
 	stopReason?: string;
 	errorMessage?: string;
-	retryAttempts?: number; // auto_retry attempts observed (Bug 1/2 diagnostic)
+	retryAttempts?: number; // auto_retry attempts observed on the child stream
 	lastStopReason?: string; // stopReason of the final assistant message
 	// internal handle to kill the child process
 	kill?: () => void;
@@ -43,7 +43,7 @@ export interface DispatchEntry {
 class Semaphore {
 	private available: number;
 	private waiters: (() => void)[] = [];
-	constructor(private readonly limit: number) {
+	constructor(limit: number) {
 		this.available = limit;
 	}
 	async acquire(): Promise<void> {

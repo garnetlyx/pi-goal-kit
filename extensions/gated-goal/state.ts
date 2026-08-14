@@ -48,11 +48,6 @@ const EMPTY: GatedGoalState = {
 export function filePath(sessionId: string): string {
 	return path.join(getAgentDir(), "gated-goal", "sessions", sessionId, "state.json");
 }
-// Pre-agent-dir layout: state was anchored to the project cwd. Kept only for
-// one-way migration into the agent directory on first load.
-function legacyFilePath(cwd: string): string {
-	return path.join(cwd, "state", "agent", "gated-goal.json");
-}
 
 export function load(ctx: ExtensionContext): GatedGoalState {
 	const sessionId = ctx.sessionManager.getSessionId();
@@ -61,18 +56,6 @@ export function load(ctx: ExtensionContext): GatedGoalState {
 		const parsed = JSON.parse(raw);
 		return { ...EMPTY, ...parsed, reviewerPermissions: parsed.reviewerPermissions ?? REVIEWER_PERMISSIONS };
 	} catch {
-		// No session-scoped file. Try the legacy cwd-anchored location: adopt
-		// it into this session so an in-flight gated-goal survives the upgrade.
-		try {
-			const legacyRaw = fs.readFileSync(legacyFilePath(ctx.cwd), "utf-8");
-			const legacyParsed = JSON.parse(legacyRaw);
-			if (legacyParsed && legacyParsed.phase && legacyParsed.phase !== "idle") {
-				const adopted = { ...EMPTY, ...legacyParsed, reviewerPermissions: legacyParsed.reviewerPermissions ?? REVIEWER_PERMISSIONS };
-				save(ctx, adopted);
-				console.error(`[gated-goal] migrated in-flight state (phase=${adopted.phase}) from legacy cwd-anchored store into session ${sessionId}.`);
-				return adopted;
-			}
-		} catch { /* ignore */ }
 		return { ...EMPTY };
 	}
 }
@@ -85,11 +68,6 @@ export function save(ctx: ExtensionContext, state: GatedGoalState): void {
 	if (!state.originalCwd) state.originalCwd = ctx.cwd;
 	fs.mkdirSync(path.dirname(filePath(sessionId)), { recursive: true });
 	fs.writeFileSync(filePath(sessionId), JSON.stringify(state, null, 2));
-}
-
-export function clear(ctx: ExtensionContext): void {
-	const sessionId = ctx.sessionManager.getSessionId();
-	try { fs.unlinkSync(filePath(sessionId)); } catch { /* ignore */ }
 }
 
 export function hashPrompt(prompt: string): string {
@@ -113,14 +91,17 @@ export function buildFrozenPrompt(parts: { outcome: string; verification: string
 	].join("\n");
 }
 
-/** Read the immutable prompt. On hash mismatch (tampering), use the archive. */
+/**
+ * Read the frozen prompt, reporting whether it still matches its own hash.
+ *
+ * A mismatch means the persisted (prompt, hash) pair is inconsistent — the
+ * prompt was edited without recomputing the hash. The stored prompt is the
+ * only copy, so there is nothing to restore from; it is used either way and
+ * the caller surfaces `tampered` as a warning. Mismatch deliberately does NOT
+ * abort the run: exiting on mismatch would turn tampering into an escape hatch
+ * out of the gate.
+ */
 export function verifiedFrozenPrompt(state: GatedGoalState): { prompt: string; tampered: boolean } {
 	const recomputed = hashPrompt(state.frozenPrompt);
-	if (recomputed === state.frozenHash) return { prompt: state.frozenPrompt, tampered: false };
-	// The archive IS the stored prompt; nothing to restore from elsewhere.
-	// Mismatch only happens if in-memory frozenPrompt drifted from its own hash,
-	// which means the persisted (prompt, hash) pair is inconsistent. We trust the
-	// hash: treat the hash as authoritative and warn. There is no "original" to
-	// restore beyond what's stored, so we keep using stored prompt and flag it.
-	return { prompt: state.frozenPrompt, tampered: true };
+	return { prompt: state.frozenPrompt, tampered: recomputed !== state.frozenHash };
 }

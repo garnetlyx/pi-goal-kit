@@ -36,6 +36,7 @@ import {
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
+	configPath,
 	ensureConfigTemplate,
 	loadConfig,
 	resolveSystemPrompt,
@@ -82,10 +83,6 @@ function notifySystem(title: string, body: string): void {
 	} catch { /* ignore */ }
 }
 
-
-function normalizePermissions(p: Permissions): Permissions {
-	return p;
-}
 
 /** Current session catalogue; scoped models win when the session restricts it. */
 function availableModels(ctx: ExtensionContext): string[] {
@@ -171,13 +168,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "subagent_roles",
 		label: "Subagent role suggestions",
-		description: "List user-configured subagent roles from state/agent/subagent.json. Model hints are advisory intent labels (may be fuzzy like 'GPT' or 'claude'), not exact IDs — resolve them against the current session catalogue with your own judgment. Suggestions are advisory; use current user/session requirements for the explicit dispatch parameters.",
+		description: `List user-configured subagent roles from ${configPath()}. Model hints are advisory intent labels (may be fuzzy like 'GPT' or 'claude'), not exact IDs — resolve them against the current session catalogue with your own judgment. Suggestions are advisory; use current user/session requirements for the explicit dispatch parameters.`,
 		parameters: Type.Object({
 			role: Type.Optional(Type.String({ description: "If set, show full details (including the complete system prompt that would be injected) for this single role. Omit to list all roles as a summary." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const cfg = loadConfig(ctx);
-			const catalogue = availableModels(ctx);
 			const names = Object.keys(cfg.roles).sort();
 			if (names.length === 0) return { content: [{ type: "text", text: "No roles configured. Choose model, permissions, and timeout directly from the current session requirements." }] };
 
@@ -225,7 +221,7 @@ export default function (pi: ExtensionAPI) {
 		description: [
 			"Delegate a task to a sub-model as a non-blocking subagent. Returns immediately with an id; you'll be woken when it finishes.",
 			"REQUIRED: detailed task, timeout, minimum permissions, and an explicit model (provider/modelId).",
-			"OPTIONAL: role selects a role description plus user suggestions from state/agent/subagent.json; name is a display label.",
+			`OPTIONAL: role selects a role description plus user suggestions from ${configPath()}; name is a display label.`,
 			"The role's default system prompt is injected as-is UNLESS you pass systemPrompt — inspect it first via subagent_roles (role param) and decide whether to pass it through, edit it, or replace it.",
 			"Role suggestedModels are advisory intent hints (may be fuzzy labels, not exact IDs), never an allowlist or automatic choice. Resolve hints against the current session catalogue; if none fit, explicitly choose another suitable available model.",
 			"Results are UNVERIFIED — independently re-check file changes, commands, and key facts before relying on them. You cannot dispatch from inside a subagent.",
@@ -239,7 +235,7 @@ export default function (pi: ExtensionAPI) {
 			}),
 			permissions: PermissionsSchema,
 			model: Type.String({
-				description: 'Model to delegate to, as "provider/modelId" (must exist in models.json). Example: "local-m4m-deployed/Deepseek-V4-Flash-q2-imatrix".',
+				description: 'Model to delegate to, as "provider/modelId". Must be available in the current session catalogue.',
 			}),
 			name: Type.Optional(Type.String({ description: "Display name for this subagent (shown in /subagents and notifications)." })),
 			role: Type.Optional(Type.String({ description: "Optional work role. Its prompt and user preferences are advisory; you still explicitly decide model, permissions, and timeout." })),
@@ -307,7 +303,7 @@ export default function (pi: ExtensionAPI) {
 				try {
 					await runChild({
 						pi, ctx, entry, modelArg,
-						permissions: normalizePermissions(permissions),
+						permissions,
 						systemPrompt: params.systemPrompt ?? resolveSystemPrompt(role).prompt,
 						timeoutSec: timeout,
 					});

@@ -31,7 +31,7 @@ really does continue (costing tokens; this is intentional).
 | Path | Purpose |
 |------|---------|
 | `extensions/todo/index.ts` | `todo` tool, `/todos` command, `agent_settled` hook, active-wait listener, below-editor widget |
-| `skills/todo/SKILL.md` | agent-facing instructions |
+| `extensions/todo/SKILL.md` | agent-facing instructions |
 
 ## `todo` tool
 

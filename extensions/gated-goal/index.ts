@@ -1,6 +1,6 @@
 /**
- * Gated-goal mode: a four-phase workflow that forces plan → act → review
- * loops until a frozen plan is satisfied or max-iteration is hit.
+ * Gated-goal mode: a five-phase workflow that forces plan → act → review →
+ * verify loops until a frozen plan is satisfied or max-iteration is hit.
  *
  *   /gated-goal [maxIteration] [reviewerModel]
  *
@@ -12,15 +12,20 @@
  *     all todos done → P4 ; else todo nudge (handled by todo ext) keeps it in P3.
  * P4 review          — spawn reviewer with the immutable frozen prompt. Parse
  *   <promise>DONE</promise>:
- *     done  → exit gated-goal (reason: done)
+ *     done  → P5 (the promise alone never exits the gate)
  *     edits → feed feedback to main agent, → P3. If reviewsCompleted reaches
  *             maxIteration before a done → exit (reason: max iteration reached).
+ * P5 verify          — main agent re-runs the frozen verification itself and
+ *   judges the output, because a reviewer can rubber-stamp:
+ *     confirm_done → exit (reason: done)
+ *     reject_done  → back to P3, costing one iteration like a failed review.
  *
  * Reviewer is a subagent: appears in /subagents, emits wait:active/done, and
  * cannot dispatch (PI_SUBAGENT_CHILD guard inherited from the runner).
  *
- * Hash integrity: the frozen prompt is re-read from JSON at spawn time; on
- * mismatch the archived prompt is still used — never exit (no cheat-exit).
+ * Hash integrity: the frozen prompt is re-checked against its hash at spawn
+ * time; on mismatch it is still used and only flagged — never exit (a mismatch
+ * must not become an escape hatch out of the gate).
  */
 
 import { dirname, join } from "node:path";
@@ -29,7 +34,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import {
 	buildFrozenPrompt,
-	clear,
 	DEFAULT_MAX_ITERATION,
 	type GatedGoalState,
 	hashPrompt,
@@ -65,7 +69,7 @@ function latestTodos(ctx: ExtensionContext): TodoSnapshot[] {
 	return [];
 }
 
-function allTodosDone(ctx: ExtensionContext): boolean {
+function allTodosDone(ctx: ExtensionContext, state: GatedGoalState): boolean {
 	const todos = latestTodos(ctx);
 	if (todos.length === 0) {
 		// Recovery case: after a restart the todo list lives in the old session
@@ -132,7 +136,7 @@ export default function (pi: ExtensionAPI) {
 	// ---- Self-heal: recover from a review interrupted by restart/crash ----
 	//
 	// If we come back up while phase === "review", the previous reviewer child
-	// was killed mid-run (e.g. pi restart, rebuild). The reviewsCompleted
+	// was killed mid-run (e.g. a pi restart or /reload). The reviewsCompleted
 	// counter was already bumped, so we must NOT silently re-enter review
 	// (that would double-count). Flip back to act so the next agent_settled
 	// with all todos done re-triggers a fresh review. Also nudge the agent so
@@ -246,7 +250,7 @@ export default function (pi: ExtensionAPI) {
 		if (state.phase === "act") {
 			// Need todos frozen AND all done to enter review.
 			if (!state.frozenHash) return;
-			if (allTodosDone(ctx)) {
+			if (allTodosDone(ctx, state)) {
 				runReviewCycle(ctx);
 			}
 			// else: todo extension nudges; stay in act.
@@ -414,7 +418,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Reject reviewer approval",
 		description: [
 			"Gated-goal VERIFY phase only. Call when the reviewer returned <promise>DONE</promise> but your own verification shows the work does NOT actually satisfy the frozen plan (reviewer rubber-stamped).",
-			"Counts this as a used iteration and returns to ACT with your reasons as feedback. If iterations reach maxIteration after this, gated-goal exits (max iteration reached).",
+			"Returns to ACT with your reasons as feedback. The iteration was already charged when the review ran, so this does not consume extra budget; the cap is re-checked after the next review.",
 		].join("\n"),
 		parameters: Type.Object({
 			reason: Type.String({ description: "What failed your independent verification. Becomes the feedback to ACT." }),
@@ -453,6 +457,3 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_settled", async (_e, ctx) => setStatus(ctx));
 	pi.on("session_start", async (_e, ctx) => setStatus(ctx));
 }
-
-// referenced to keep import used in some tooling paths
-void clear;

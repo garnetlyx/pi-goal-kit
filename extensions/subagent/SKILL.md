@@ -17,7 +17,7 @@ must explicitly choose `model`, `permissions`, and `timeout` based on:
 1. an explicit model/role request in the current user turn;
 2. the actual task and required capabilities;
 3. models available in the current session catalogue;
-4. user role suggestions from `state/agent/subagent.json`;
+4. user role suggestions from `subagent.json`;
 5. cost, speed, context size, concurrency, and reliability.
 
 Role `suggestedModels` are ordered preferences, not an allowlist, lock, or
@@ -26,10 +26,11 @@ suggestion is available. If every suggestion is unavailable or unsuitable,
 choose another suitable available model. Never invent an unavailable model.
 Use `subagent_roles` when role preferences or current matches are needed.
 
-`models.json` / the session model registry is the source of truth for actual
-availability. `state/agent/subagent.json` is the single user-owned source for
-role preferences and resource-group configuration. This skill contains
-policy, not duplicated model lists.
+The session model registry (`models.json` plus any registered providers) is the
+source of truth for actual availability. `subagent.json` is the single
+user-owned source for role preferences and resource-group configuration. Both
+live in Pi's agent directory; `subagent_roles` reports its resolved path. This
+skill contains policy, not duplicated model lists.
 
 ## `dispatch` — all decisions remain explicit
 
@@ -44,6 +45,11 @@ Required:
   - `"junior"`: adds write/edit;
   - `"full"`: all tools, only when genuinely required;
   - explicit array such as `["read","grep","web_search"]`.
+
+  `"readonly"` withholds the write/edit tools but still includes `bash`, which
+  is not sandboxed — a child that ignores instructions can still change the
+  workspace through a shell command. When you need a hard boundary, pass an
+  explicit array without `bash`.
 - **`model`** — explicit current-session `"provider/modelId"`.
 
 Optional:
@@ -67,7 +73,7 @@ dispatch({
 
 ## Configuration ownership
 
-The `subagent.json` object in `state/agent/subagent.json` contains:
+`subagent.json` contains:
 
 - `roles.<name>.suggestedModels`: ordered bare model IDs or
   `provider/modelId` suggestions;
@@ -78,17 +84,18 @@ The `subagent.json` object in `state/agent/subagent.json` contains:
 
 Bare IDs intentionally survive provider changes; they match any currently
 available provider carrying that ID. Fully qualified suggestions target one
-provider. The extension reads the portable agent directory, not the project
-cwd, so preferences work when `pp` is launched from any path.
+provider. The file is read from Pi's agent directory, not the project cwd, so
+the same preferences apply no matter which project Pi is started from.
 
 Roles (`explorer`, `planner`, `advisor`, `worker`) live entirely in
-`state/agent/subagent.json` — each carries its own description, model hints,
+`subagent.json` — each carries its own description, model hints,
 permissions, timeout, and optional systemPrompt. No bundled prompt files.
 A role's fields are advisory; the main agent's explicit dispatch parameters
 (model/permissions/timeout/systemPrompt) always win.
 
-After editing `subagent.json`, quit and restart Pi so the user source is
-regenerated and loaded consistently.
+The file is created with starter roles on first run and never overwritten
+afterwards. It is read per tool call, but tool schemas are fixed at session
+start — restart Pi after editing if a change should affect them.
 
 ## When to delegate
 

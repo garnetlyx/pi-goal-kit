@@ -23,7 +23,13 @@ const SAFE_EXTENSION_TOOLS = ["web_search", "web_fetch"];
 /** Map a Permissions spec to a pi `--tools` whitelist (undefined = all tools).
  *  readonly/junior intentionally expose read-only builtin tools plus the
  *  safe network extension tools (web_search/web_fetch) so that research-style
- *  subagents can fetch the web without being granted workspace write access. */
+ *  subagents can fetch the web without being handed write/edit.
+ *
+ *  Caveat: `readonly` withholds the write/edit *tools*, but it still includes
+ *  `bash`, which is not sandboxed — a child that ignores its instructions can
+ *  still modify the workspace through a shell command. Treat `readonly` as
+ *  "no editing tools + an instruction not to write", not as an enforced
+ *  boundary. Pass an explicit whitelist without `bash` if you need a hard one. */
 function permissionsToTools(perm: Permissions): string[] | undefined {
 	if (perm === "full") return undefined;
 	if (perm === "readonly") return ["read", "grep", "find", "ls", "bash", ...SAFE_EXTENSION_TOOLS];

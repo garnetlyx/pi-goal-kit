@@ -12,7 +12,6 @@
  * without an idle redraw loop.
  */
 
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { DispatchEntry, DispatchStatus } from "./scheduler.ts";
@@ -172,7 +171,6 @@ export async function openSubagentsPanel(_pi: ExtensionAPI, ctx: ExtensionContex
 	const startShowAll = arg === "all";
 
 	await ctx.ui.custom<void>((tui, theme, _kb, done) => {
-		void getMarkdownTheme();
 		const fg = theme.fg?.bind(theme);
 		const state: State = { selected: 0, showAll: startShowAll, expanded: false, visible: [] };
 

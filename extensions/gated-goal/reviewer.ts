@@ -7,9 +7,9 @@
  *   pingReviewer  — quick connectivity check (P1). Throws on failure/timeout.
  *   runReview     — full review (P4). Returns { done, output, tampered }.
  *
- * Hash integrity: the frozen prompt is re-read from state at spawn time. If
- * the recomputed hash mismatches the stored one, the archived prompt is still
- * used (never exit on mismatch — that would let tampering abort the gate).
+ * Hash integrity: the frozen prompt is re-checked against its hash at spawn
+ * time. On mismatch it is still used and only flagged (never exit on mismatch —
+ * that would turn editing the plan into an escape hatch out of the gate).
  *
  * Promise parsing: reviewer output containing <promise>DONE</promise>
  * (whitespace-tolerant) marks the review as passed.
@@ -18,7 +18,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { genId, type DispatchEntry, registry, splitModel } from "../subagent/scheduler.ts";
 import { runChild } from "../subagent/runner.ts";
-import { type GatedGoalState, hashPrompt, verifiedFrozenPrompt } from "./state.ts";
+import { type GatedGoalState, REVIEWER_PERMISSIONS, verifiedFrozenPrompt } from "./state.ts";
 
 const PROMISE_RE = /<promise>\s*DONE\s*<\/promise>/i;
 
@@ -27,7 +27,7 @@ function buildReviewerEntry(opts: { name: string; model: string; task: string; g
 	return {
 		id: genId(),
 		name: opts.name,
-		preset: "reviewer",
+		role: "reviewer",
 		model: opts.model,
 		provider,
 		task: opts.task,
@@ -46,7 +46,7 @@ export async function pingReviewer(pi: ExtensionAPI, ctx: ExtensionContext, mode
 	const entry: DispatchEntry = {
 		id: genId(),
 		name: `reviewer-ping-${provider}`,
-		preset: "reviewer-ping",
+		role: "reviewer-ping",
 		model,
 		provider,
 		task: "(connectivity probe) reply with exactly: ok",
@@ -62,7 +62,7 @@ export async function pingReviewer(pi: ExtensionAPI, ctx: ExtensionContext, mode
 	try {
 		await runChild({
 			pi, ctx, entry, modelArg: model,
-			permissions: ["read", "grep", "find", "ls", "bash"],
+			permissions: REVIEWER_PERMISSIONS,
 			systemPrompt: "You are a connectivity probe. Reply with exactly: ok",
 			timeoutSec,
 		});
@@ -92,7 +92,6 @@ export interface ReviewResult {
  */
 export async function runReview(pi: ExtensionAPI, ctx: ExtensionContext, state: GatedGoalState, reviewNumber: number, timeoutSec = 1200): Promise<ReviewResult> {
 	const { prompt, tampered } = verifiedFrozenPrompt(state);
-	void hashPrompt; // referenced for audit
 
 	const name = `reviewer-${reviewNumber}`;
 	const entry = buildReviewerEntry({ name, model: state.reviewerModel, task: `Review #${reviewNumber} against frozen plan`, group: "default" });
@@ -101,7 +100,8 @@ export async function runReview(pi: ExtensionAPI, ctx: ExtensionContext, state: 
 
 	const systemPrompt = [
 		"You are a strict reviewer subagent operating in an isolated context window.",
-		"You CANNOT dispatch further subagents. You can read files, search, and run verification commands (tests, build, git diff) — but you cannot edit or write files.",
+		"You cannot dispatch further subagents. You have no write or edit tools: read files, search, and run verification commands (tests, build, git diff).",
+		"Your bash access is for inspection only — do not use it to create, modify, or delete anything in the workspace. Report problems; never fix them yourself.",
 		"",
 		"Your job: verify the main agent's work against the FROZEN plan below. Run the verification commands it specifies. Check every constraint.",
 		"",

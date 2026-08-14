@@ -1,9 +1,9 @@
 /**
  * Subagent user configuration loader.
  *
- * `state/agent/subagent.json` is the single user-owned source for role
- * preferences and scheduling. `models.json` remains the source of truth for
- * actual availability.
+ * `subagent.json` in Pi's agent directory is the single user-owned source for
+ * role preferences and scheduling. The session model registry remains the
+ * source of truth for actual model availability.
  */
 
 import * as fs from "node:fs";
@@ -80,7 +80,9 @@ const DEFAULT_CONFIG: SubagentConfig = {
 	roles: {},
 };
 
-function configPath(): string { return path.join(getAgentDir(), "subagent.json"); }
+/** Resolved config path for this install — the only place that decides where
+ *  the file lives. Never hardcode it; `getAgentDir()` varies by install. */
+export function configPath(): string { return path.join(getAgentDir(), "subagent.json"); }
 
 function normalize(raw: any): SubagentConfig {
 	const rawRoles = (raw?.roles ?? {}) as Record<string, any>;
@@ -115,16 +117,10 @@ export function concurrencyForGroup(cfg: SubagentConfig, group: string): number 
 	return cfg.resourceGroups[group]?.concurrency ?? cfg.resourceGroups[cfg.defaults.defaultResourceGroup]?.concurrency ?? 1;
 }
 
+/** Starter file contents: the built-in defaults plus a few example roles. */
 function starterConfig(): SubagentConfig {
 	return {
-		defaults: {
-			timeoutSec: 600,
-			hungThresholdSec: 120,
-			defaultResourceGroup: "default",
-			retainCompletedSec: 1800,
-		},
-		resourceGroups: { default: { concurrency: 4 } },
-		providerGroups: {},
+		...DEFAULT_CONFIG,
 		roles: {
 			explorer: { description: "Reconnaissance of a codebase or external information sources (knowledge bases, the web, user-provided context), returning compressed findings for handoff to other agents", suggestedModels: [], permissions: "readonly", timeoutSec: 900 },
 			planner: { description: "Implementation planning from supplied context", suggestedModels: [], permissions: "readonly", timeoutSec: 900 },
@@ -134,7 +130,7 @@ function starterConfig(): SubagentConfig {
 	};
 }
 
-/** Ensure state/agent/subagent.json exists with starter defaults. */
+/** Ensure `<agent dir>/subagent.json` exists with starter defaults. */
 export function ensureConfigTemplate(_ctx: ExtensionContext): void {
 	const target = configPath();
 	if (fs.existsSync(target)) return;

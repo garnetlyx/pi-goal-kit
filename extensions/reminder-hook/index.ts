@@ -48,15 +48,12 @@ interface Reminder {
 	// Behavior:
 	pollSeconds?: number; // polling interval for condition (default 30)
 	timeoutMs?: number; // hard cap; fires with timeout flag when elapsed
-	// internal:
-	fired?: boolean;
-	timeout?: boolean;
 }
 
 const DEFAULT_POLL_SECONDS = 30;
 
 // State is session-scoped: each session keeps its own reminder list under
-// state/agent/reminder-hook/sessions/<sessionId>/reminders.json. The wrapper
+// <agent dir>/reminder-hook/sessions/<sessionId>/reminders.json. The wrapper
 // records originalCwd so a path change (project moved / mounted elsewhere)
 // is detectable instead of silently using stale-path assumptions.
 interface ReminderStore {
@@ -70,38 +67,12 @@ function stateDir(sessionId: string): string {
 function stateFile(sessionId: string): string {
 	return path.join(stateDir(sessionId), "reminders.json");
 }
-// Pre-agent-dir layout: state was anchored to the project cwd. Kept only for
-// one-way migration into the agent directory on first load.
-function legacyStateFile(cwd: string): string {
-	return path.join(cwd, "state", "agent", "reminder-hook", "reminders.json");
-}
-
-function loadReminders(cwd: string, sessionId: string): Reminder[] {
+function loadReminders(sessionId: string): Reminder[] {
 	try {
-		const raw = fs.readFileSync(stateFile(sessionId), "utf-8");
-		const parsed = JSON.parse(raw);
-		// New wrapper shape.
-		if (parsed && Array.isArray(parsed.reminders)) return parsed.reminders as Reminder[];
-		// Legacy bare-array shape (pre-session-binding).
-		if (Array.isArray(parsed)) return parsed as Reminder[];
-		return [];
+		const parsed = JSON.parse(fs.readFileSync(stateFile(sessionId), "utf-8"));
+		return Array.isArray(parsed?.reminders) ? (parsed.reminders as Reminder[]) : [];
 	} catch {
-		// No session-scoped file yet. Try the legacy cwd-anchored location:
-		// if it exists, adopt its reminders into this session so existing users
-		// don't lose armed reminders on upgrade. The legacy file is left in
-		// place (not deleted) as a backup.
-		try {
-			const legacyRaw = fs.readFileSync(legacyStateFile(cwd), "utf-8");
-			const legacyParsed = JSON.parse(legacyRaw);
-			const legacy = Array.isArray(legacyParsed) ? (legacyParsed as Reminder[]) : [];
-			if (legacy.length > 0) {
-				saveReminders(cwd, sessionId, legacy);
-				console.error(`[reminder-hook] migrated ${legacy.length} reminder(s) from legacy cwd-anchored store into session ${sessionId}.`);
-			}
-			return legacy;
-		} catch {
-			return [];
-		}
+		return [];
 	}
 }
 function saveReminders(cwd: string, sessionId: string, reminders: Reminder[]): void {
@@ -183,7 +154,7 @@ export default function (pi: ExtensionAPI) {
 
 	function fireReminder(ctx: ExtensionContext, r: Reminder, opts: { timeout?: boolean } = {}): void {
 		clearHandle(r.id);
-		const remaining = loadReminders(ctx.cwd, ctx.sessionManager.getSessionId()).filter((x) => x.id !== r.id);
+		const remaining = loadReminders(ctx.sessionManager.getSessionId()).filter((x) => x.id !== r.id);
 		saveReminders(ctx.cwd, ctx.sessionManager.getSessionId(), remaining);
 		pi.events.emit("wait:done", { source: "reminder-hook", id: r.id });
 
@@ -198,7 +169,7 @@ export default function (pi: ExtensionAPI) {
 		pi.sendUserMessage(prefix + r.message, { deliverAs: "followUp" });
 	}
 
-		// The condition executor. Windows has no `bash` by default, so we prefer
+	// The condition executor. Windows has no `bash` by default, so we prefer
 	// bash when present (Git Bash / WSL) and fall back to PowerShell. The
 	// resolved shell is detected once per process and cached. Write your
 	// `condition` predicate in the dialect of whichever shell is active — the
@@ -271,7 +242,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function addReminder(ctx: ExtensionContext, r: Reminder): Reminder {
-		const all = loadReminders(ctx.cwd, ctx.sessionManager.getSessionId());
+		const all = loadReminders(ctx.sessionManager.getSessionId());
 		all.push(r);
 		saveReminders(ctx.cwd, ctx.sessionManager.getSessionId(), all);
 		arm(ctx, r);
@@ -288,7 +259,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		// Remove the persistent widget used by older versions of /reminders.
 		ctx.ui.setWidget?.("reminder-hook", undefined);
-		const pending = loadReminders(ctx.cwd, ctx.sessionManager.getSessionId());
+		const pending = loadReminders(ctx.sessionManager.getSessionId());
 		for (const r of pending) {
 			// Pure time reminder already due → fire immediately on reload.
 			if (!r.condition && r.when && r.when <= Date.now()) {
@@ -398,7 +369,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({ id: Type.String() }),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			clearHandle(params.id);
-			const remaining = loadReminders(ctx.cwd, ctx.sessionManager.getSessionId()).filter((x) => x.id !== params.id);
+			const remaining = loadReminders(ctx.sessionManager.getSessionId()).filter((x) => x.id !== params.id);
 			saveReminders(ctx.cwd, ctx.sessionManager.getSessionId(), remaining);
 			pi.events.emit("wait:done", { source: "reminder-hook", id: params.id });
 			return { content: [{ type: "text", text: `Cancelled ${params.id}.` }] };
@@ -410,7 +381,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("reminders", {
 		description: "List pending reminders",
 		handler: async (_args, ctx) => {
-			const getAll = () => loadReminders(ctx.cwd, ctx.sessionManager.getSessionId());
+			const getAll = () => loadReminders(ctx.sessionManager.getSessionId());
 			const initial = getAll();
 			if (initial.length === 0) {
 				ctx.ui.notify("No pending reminders", "info");
@@ -494,7 +465,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			clearHandle(id);
-			const remaining = loadReminders(ctx.cwd, ctx.sessionManager.getSessionId()).filter((x) => x.id !== id);
+			const remaining = loadReminders(ctx.sessionManager.getSessionId()).filter((x) => x.id !== id);
 			saveReminders(ctx.cwd, ctx.sessionManager.getSessionId(), remaining);
 			pi.events.emit("wait:done", { source: "reminder-hook", id });
 			ctx.ui.notify(`Cancelled ${id}`, "info");

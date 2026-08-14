@@ -79,7 +79,9 @@ export default function (pi: ExtensionAPI) {
 
 	let todos: Todo[] = [];
 	let nextId = 1;
-	let lastSettledIncompleteCount = -1; // to de-dup repeated nudges when nothing changed
+	// Signature of the incomplete set at the last nudge, to de-dup repeated
+	// nudges when nothing changed. Empty = nothing nudged yet.
+	let lastNudgeSignature = "";
 
 	// Active waits from other extensions (subagent, reminder-hook, ...).
 	const activeWaits = new Set<string>(); // `${source}:${id}`
@@ -134,7 +136,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_settled", async (_event, ctx) => {
 		const incomplete = todos.filter(isIncomplete);
 		if (incomplete.length === 0) {
-			lastSettledIncompleteCount = 0;
+			lastNudgeSignature = "";
 			return;
 		}
 		if (activeWaits.size > 0) {
@@ -144,8 +146,8 @@ export default function (pi: ExtensionAPI) {
 		// last nudge, the agent already saw it and chose to stop. Don't spam.
 		const sig = incomplete.map((t) => t.id).sort().join(",");
 		const countSig = `${incomplete.length}|${sig}`;
-		if (countSig === lastSettledIncompleteCount) return;
-		lastSettledIncompleteCount = countSig;
+		if (countSig === lastNudgeSignature) return;
+		lastNudgeSignature = countSig;
 
 		const list = incomplete
 			.map((t) => `  [${t.status}] #${t.id} ${t.text}`)
@@ -165,7 +167,7 @@ export default function (pi: ExtensionAPI) {
 	// Reset the de-dup signature whenever the list changes, so a fresh stop
 	// after progress nudges again.
 	const resetNudgeSig = () => {
-		lastSettledIncompleteCount = -1;
+		lastNudgeSignature = "";
 	};
 
 	pi.registerTool({

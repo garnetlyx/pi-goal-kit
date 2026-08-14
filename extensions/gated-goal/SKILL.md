@@ -1,12 +1,13 @@
 ---
 name: gated-goal
-description: Use when the user invokes /gated-goal to start a plan-act-review loop with a frozen, tamper-proof plan and an independent reviewer subagent that gates completion. Four phases — select reviewer, plan (freeze), act (work todos), review (reviewer verifies against frozen plan). The loop repeats until the reviewer emits <promise>DONE</promise> or max-iteration is reached.
+description: Use when the user invokes /gated-goal to start a plan-act-review loop with a frozen, hash-checked plan and an independent reviewer subagent that gates completion. Five phases — select reviewer, plan (freeze), act (work todos), review (reviewer checks against the frozen plan), verify (you re-run the verification yourself). The loop repeats until you confirm completion or max-iteration is reached.
 ---
 
 # Gated-goal mode
 
-A four-phase workflow that gates task completion behind an independent review
-against a frozen plan. Started by the user with `/gated-goal`.
+A five-phase workflow that gates task completion behind an independent review
+against a frozen plan, plus your own verification pass. Started by the user
+with `/gated-goal`.
 
 ## Starting
 
@@ -43,15 +44,16 @@ So: mark items done as you finish, and stop only when the work is complete.
 
 ### P4 — review
 The reviewer subagent re-checks the work against the **frozen** plan and runs
-the verification commands. Two outcomes:
+the verification commands. The iteration counter ticks on either outcome — a
+review that ran is spent regardless of its verdict. Then:
 - It outputs `<promise>DONE</promise>` → control passes to you for VERIFY (P5).
   **Do not exit yet** — reviewers can rubber-stamp.
-- It lists required changes → they come back to you as a follow-up; iteration
-  counter ticks; go back to P3. The next review is a **fresh** reviewer
-  context (only the frozen plan carries over, not prior review chatter).
+- It lists required changes → they come back to you as a follow-up; go back to
+  P3. The next review is a **fresh** reviewer context (only the frozen plan
+  carries over, not prior review chatter).
 
-If iterations reach `maxIteration` without a DONE → gated-goal exits, reason
-**max iteration reached**.
+If the counter reaches `maxIteration` without a confirmed completion →
+gated-goal exits, reason **max iteration reached**.
 
 ### P5 — verify (your independent check)
 Only reached after the reviewer says DONE. You must independently re-run the
@@ -59,9 +61,10 @@ frozen verification commands yourself and **subjectively judge** whether the
 work genuinely satisfies the plan — reviewers sometimes approve without
 actually checking. Then:
 - `confirm_done` (optional note) → gated-goal exits, reason **done**.
-- `reject_done` (reason) → counts as a used iteration; your reason becomes
-  ACT feedback; back to P3. If this pushes iterations to `maxIteration` →
-  exit (max iteration reached).
+- `reject_done` (reason) → your reason becomes ACT feedback; back to P3. The
+  iteration was already charged when the review ran, so rejecting costs no
+  extra budget — but it does mean this round produced no progress toward the
+  cap being lifted.
 
 This is the final gate. The reviewer's promise is necessary but not
 sufficient — your own verification is what closes the loop.
@@ -69,8 +72,9 @@ sufficient — your own verification is what closes the loop.
 ## Integrity
 
 The frozen plan is hashed and stored. At every review the hash is recomputed;
-on mismatch the archived plan is still used — mismatch never exits the gate
-(tampering cannot abort it).
+on mismatch the stored plan is still used and the mismatch is only flagged in
+the feedback — it never exits the gate, so editing the plan cannot be used to
+abort the workflow.
 
 ## Aborting
 
@@ -78,8 +82,9 @@ on mismatch the archived plan is still used — mismatch never exits the gate
 
 ## Notes
 
-- The reviewer has read-only + bash tools (can run tests, can't edit). It is a
-  subagent, so it obeys the same `wait:active`/`wait:done` protocol as
-  dispatch — todo nudges stay silent while it runs.
+- The reviewer gets read-only tools plus bash (so it can run tests and `git
+  diff`) and no write/edit tools. It is a subagent, so it obeys the same
+  `wait:active`/`wait:done` protocol as dispatch — todo nudges stay silent
+  while it runs.
 - You can still dispatch your own subagents in P3 for exploration/implementation
   (subject to constraints you wrote into the plan).

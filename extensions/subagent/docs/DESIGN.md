@@ -16,11 +16,11 @@ There are three deliberately non-overlapping sources:
 | Source | Sole responsibility |
 |---|---|
 | Pi session model registry (`models.json` plus registered providers) | factual model availability |
-| `state/agent/subagent.json` | single user-owned source: role suggestions, resource/concurrency configuration, and optional role system prompts |
-| `skills/subagent/SKILL.md` | main-agent decision policy and tool usage |
+| `subagent.json` | single user-owned source: role suggestions, resource/concurrency configuration, and optional role system prompts |
+| `extensions/subagent/SKILL.md` | main-agent decision policy and tool usage |
 
-`subagent.json` is resolved through Pi's portable agent directory, not
-`ctx.cwd`, so the same preferences apply when `pp` starts from any project.
+`subagent.json` is resolved through Pi's agent directory, not `ctx.cwd`, so
+the same preferences apply no matter which project Pi is started from.
 
 Role `suggestedModels` are ordered advice, not an allowlist or fallback
 algorithm. Suggestions may be bare model IDs (match any available provider) or
@@ -66,8 +66,8 @@ nested dispatch.
 | `extensions/subagent/runner.ts` | child spawn, JSON capture, timeout, tool gate |
 | `extensions/subagent/panel.ts` | bordered `/subagents` overlay |
 | `extensions/subagent/config.ts` | `subagent.json` loader/seeder |
-| `state/agent/subagent.json` | single user-owned subagent configuration (roles + optional prompts) |
-| `skills/subagent/SKILL.md` | agent-facing dispatch policy; no concrete model list |
+| `subagent.json` | single user-owned subagent configuration (roles + optional prompts) |
+| `extensions/subagent/SKILL.md` | agent-facing dispatch policy; no concrete model list |
 
 ## Tools
 
@@ -106,9 +106,11 @@ If an explicit model is absent from the current session catalogue, dispatch
 fails with usable role suggestions (or available alternatives), requiring the
 main agent to choose and retry. It does not auto-substitute.
 
-Role timeout bounds are advisory warnings. Explicit current-turn decisions
-win. `resourceGroup` is operational configuration and may still route the
-chosen provider to the correct semaphore.
+A role's `timeoutSec` is advisory only — the explicit dispatch `timeout` always
+wins and no warning is emitted on override, because local and quantized models
+routinely need far longer than a role's suggested value and nagging would push
+the main agent toward under-sizing it. `resourceGroup` is operational
+configuration and still routes the chosen provider to the correct semaphore.
 
 ### `dispatch_status` / `dispatch_cancel`
 
@@ -136,19 +138,20 @@ Text status list / cancellation by id.
       "description": "Fast reconnaissance",
       "suggestedModels": ["fast-model", "provider/backup-model"],
       "permissions": "readonly",
-      "timeoutMin": 120,
-      "timeoutMax": 900
+      "timeoutSec": 900,
+      "systemPrompt": "optional; replaces the generic default for this role"
     }
   }
 }
 ```
 
-`state/agent/subagent.json` is created only when absent. User edits to
-`subagent.json` take effect after quitting and restarting Pi, per the portable
-configuration contract.
+`subagent.json` is seeded with starter roles only when absent, and
+never overwritten afterwards. `loadConfig` re-reads it per tool call, but tool
+schemas are fixed at session start, so restart Pi when an edit needs to reach
+them.
 
-Bundled curated role prompts omit model advice so user model preferences have
-one source: `subagent.json`.
+Role prompts carry no model advice, so user model preferences have one source:
+`suggestedModels`.
 
 ## `/subagents` panel
 
@@ -169,9 +172,9 @@ files, commands, and facts.
   **not** refresh the main agent's view of tool schemas — changes to tool
   parameters require a full Pi restart before the main agent can see and fill
   the new fields. Plan extension schema edits as a restart-required change.
-- Extension code is loaded from `state/agent/extensions/subagent/` (the
-  deployed copy), not `extensions/subagent/` (the source). Edits to the source
-  tree must be synced to the deployed tree (via `rebuild` or a manual copy)
-  before they reach runtime.
 - Panel uses fixed list/output line budgets because `render` exposes width but
   not terminal height.
+- `readonly` and the reviewer permission set include `bash`, which is not
+  sandboxed. They withhold the write/edit *tools*, but a child that ignores
+  its instructions can still mutate the workspace via a shell command. Pass an
+  explicit whitelist without `bash` when a hard boundary is required.
