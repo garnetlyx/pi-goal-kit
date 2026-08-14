@@ -1,0 +1,11 @@
+{
+  "name": "pi-gated-goal",
+  "version": "0.1.0",
+  "description": "A wait-aware extension set for Pi: gated-goal plan-act-review loop, subagent delegation, todo tracking, and reminder hooks.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions"]
+  }
+}
