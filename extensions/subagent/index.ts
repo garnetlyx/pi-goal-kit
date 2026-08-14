@@ -50,6 +50,11 @@ import {
 } from "./scheduler.ts";
 import { describePermissions, runChild } from "./runner.ts";
 import { openSubagentsPanel } from "./panel.ts";
+import {
+	availableModelRecords,
+	availableModels,
+	matchHint,
+} from "./models.ts";
 
 function notifySystem(title: string, body: string): void {
 	// OSC 777 escape is the primary channel — modern terminals
@@ -84,25 +89,7 @@ function notifySystem(title: string, body: string): void {
 }
 
 
-/** Current session catalogue; scoped models win when the session restricts it. */
-function availableModels(ctx: ExtensionContext): string[] {
-	const scoped = (ctx as any).scopedModels as Array<{ model: { provider: string; id: string } }> | undefined;
-	if (scoped && scoped.length > 0) return scoped.map((s) => `${s.model.provider}/${s.model.id}`);
-	const registry: any = (ctx as any).modelRegistry;
-	const out: string[] = [];
-	try {
-		const available = registry?.getAvailable?.() ?? [];
-		for (const model of available) out.push(`${model.provider}/${model.id}`);
-		if (out.length > 0) return out;
-		const providers = registry?.getProviders?.() ?? registry?.providers ?? [];
-		for (const item of providers) {
-			const provider = typeof item === "string" ? item : item?.id;
-			const models = registry?.getModels?.(provider) ?? item?.models ?? [];
-			for (const model of models) out.push(`${provider}/${typeof model === "string" ? model : model.id}`);
-		}
-	} catch { /* leave empty: child Pi remains the final authority */ }
-	return out;
-}
+
 
 
 export default function (pi: ExtensionAPI) {
@@ -168,14 +155,34 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "subagent_roles",
 		label: "Subagent role suggestions",
-		description: `List user-configured subagent roles from ${configPath()}. Model hints are advisory intent labels (may be fuzzy like 'GPT' or 'claude'), not exact IDs — resolve them against the current session catalogue with your own judgment. Suggestions are advisory; use current user/session requirements for the explicit dispatch parameters.`,
+		description: [
+			`List user-configured subagent roles from ${configPath()}, AND list the models currently available in this session (provider/modelId).`,
+			"Use this as the discovery tool before dispatch: it returns the session catalogue so you can pick a concrete model instead of guessing.",
+			"Model hints are advisory intent labels (may be fuzzy like 'GPT' or 'claude'), not exact IDs — the output shows which hints match a currently available model.",
+			"Suggestions are advisory; use current user/session requirements for the explicit dispatch parameters.",
+		].join("\n"),
 		parameters: Type.Object({
 			role: Type.Optional(Type.String({ description: "If set, show full details (including the complete system prompt that would be injected) for this single role. Omit to list all roles as a summary." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const cfg = loadConfig(ctx);
 			const names = Object.keys(cfg.roles).sort();
-			if (names.length === 0) return { content: [{ type: "text", text: "No roles configured. Choose model, permissions, and timeout directly from the current session requirements." }] };
+			const records = availableModelRecords(ctx);
+			const catalogue = records.map((m) => `${m.provider}/${m.id}`);
+			const catalogueBlock = catalogue.length > 0
+				? `${catalogue.slice(0, 60).join("\n")}${catalogue.length > 60 ? `\n... (${catalogue.length - 60} more)` : ""}`
+				: "(none — no models discovered; the child Pi will surface any auth error if you dispatch anyway)";
+			if (names.length === 0) return { content: [{ type: "text", text: `No roles configured. Choose model, permissions, and timeout directly from the current session requirements.\n\nCurrently available models in this session:\n${catalogueBlock}` }] };
+
+			const hintLine = (hints: string[]): string => {
+				if (hints.length === 0) return "none";
+				return hints.map((h) => {
+					const matches = matchHint(h, records);
+					return matches.length > 0
+						? `${h} → ${matches.map((m) => `${m.provider}/${m.id}`).slice(0, 5).join(", ")}`
+						: `${h} (no match in session)`;
+				}).join(", ");
+			};
 
 			const summarize = (name: string): string => {
 				const role = cfg.roles[name];
@@ -186,7 +193,7 @@ export default function (pi: ExtensionAPI) {
 					: `${resolved.source} override, ${resolved.prompt.length} chars (pass role="${name}" to view in full)`;
 				return [
 					`${name}: ${role?.description ?? ""}`,
-					`  model hints (advisory, may be fuzzy intent labels): ${hints.join(", ") || "none"}`,
+					`  model hints (advisory, fuzzy ok): ${hintLine(hints)}`,
 					`  preferences: permissions=${Array.isArray(role?.permissions) ? role.permissions.join(",") : role?.permissions ?? "none"}, suggested timeout=${role?.timeoutSec ?? 900}s`,
 					`  system prompt: ${promptLabel}`,
 				].join("\n");
@@ -202,16 +209,16 @@ export default function (pi: ExtensionAPI) {
 				const hints = role?.suggestedModels ?? [];
 				const detail = [
 					`${name}: ${role?.description ?? ""}`,
-					`  model hints (advisory, may be fuzzy intent labels): ${hints.join(", ") || "none"}`,
+					`  model hints (advisory, fuzzy ok): ${hintLine(hints)}`,
 					`  preferences: permissions=${Array.isArray(role?.permissions) ? role.permissions.join(",") : role?.permissions ?? "none"}, suggested timeout=${role?.timeoutSec ?? 900}s`,
 					`  system prompt source: ${resolved.source}`,
 					`  system prompt (full):`,
 					resolved.prompt,
 				].join("\n");
-				return { content: [{ type: "text", text: `${detail}\n\nThis is the system prompt that would be injected by default. To pass it through unchanged, omit the dispatch systemPrompt param. To modify it, pass your version via dispatch systemPrompt.` }] };
+				return { content: [{ type: "text", text: `${detail}\n\nThis is the system prompt that would be injected by default. To pass it through unchanged, omit the dispatch systemPrompt param. To modify it, pass your version via dispatch systemPrompt.\n\nCurrently available models in this session:\n${catalogueBlock}` }] };
 			}
 
-			return { content: [{ type: "text", text: `${names.map(summarize).join("\n")}\n\nThese are user suggestions, not constraints. The final dispatch model/permissions/timeout must be explicit and may differ for the current task or user request.` }] };
+			return { content: [{ type: "text", text: `${names.map(summarize).join("\n")}\n\nThese are user suggestions, not constraints. The final dispatch model/permissions/timeout must be explicit and may differ for the current task or user request.\n\nCurrently available models in this session (use these for dispatch's model param):\n${catalogueBlock}` }] };
 		},
 	});
 

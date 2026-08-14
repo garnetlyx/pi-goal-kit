@@ -42,6 +42,7 @@ import {
 	save,
 } from "./state.ts";
 import { pingReviewer, runReview } from "./reviewer.ts";
+import { availableModels } from "../subagent/models.ts";
 
 /** Extract a `## Section` body from the frozen prompt. Returns "(not specified)" if absent. */
 function extractSection(prompt: string, name: string): string {
@@ -87,24 +88,6 @@ function modelIdOf(ctx: ExtensionContext): string {
 	return m && m.provider && m.id ? `${m.provider}/${m.id}` : "";
 }
 
-/** Collect available model ids (scoped or full catalogue). */
-function availableModels(ctx: ExtensionContext): string[] {
-	const scoped = (ctx as any).scopedModels as Array<{ model: { provider: string; id: string } }> | undefined;
-	if (scoped && scoped.length > 0) {
-		return scoped.map((s) => `${s.model.provider}/${s.model.id}`);
-	}
-	const reg: any = (ctx as any).modelRegistry;
-	const out: string[] = [];
-	try {
-		const providers = reg?.getProviders?.() ?? reg?.providers ?? [];
-		for (const p of providers) {
-			const pid = typeof p === "string" ? p : p?.id;
-			const models = reg?.getModels?.(pid) ?? p?.models ?? [];
-			for (const mm of models) out.push(`${pid}/${typeof mm === "string" ? mm : mm.id}`);
-		}
-	} catch { /* ignore */ }
-	return out;
-}
 
 export default function (pi: ExtensionAPI) {
 	const baseDir = dirname(fileURLToPath(import.meta.url));
