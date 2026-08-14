@@ -197,6 +197,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	// Evaluate one reminder's condition. Returns true if satisfied.
+	// The spawned child is tracked in `activeChildren` so cancel/shutdown/
+	// timeout can kill it — otherwise a slow or hung predicate (curl without
+	// --max-time, gh run watch) keeps running after the reminder is gone.
+	const activeChildren = new Map<string, import("node:child_process").ChildProcess>();
 	function checkCondition(r: Reminder): Promise<boolean> {
 		return new Promise((resolve) => {
 			if (!r.condition) {
@@ -206,8 +210,10 @@ export default function (pi: ExtensionAPI) {
 			const { command, shell } = resolveShell();
 			const args = shell === "bash" ? ["-c", r.condition] : ["-NoProfile", "-Command", r.condition];
 			const child = spawn(command, args, { stdio: "ignore" });
-			child.on("exit", (code) => resolve(code === 0));
-			child.on("error", () => resolve(false));
+			activeChildren.set(r.id, child);
+			const done = (ok: boolean) => { activeChildren.delete(r.id); resolve(ok); };
+			child.on("exit", (code) => done(code === 0));
+			child.on("error", () => done(false));
 		});
 	}
 
@@ -218,27 +224,61 @@ export default function (pi: ExtensionAPI) {
 		// Time gate: earliest moment we may fire / start checking condition.
 		const gate = r.when ?? 0;
 
+		// setInterval does not await Promises, so without an in-flight guard a
+		// slow condition (e.g. `gh run watch`, `curl` without --max-time) makes
+		// overlapping ticks pile up — one per poll interval, unbounded.
+		// `inFlight` collapses them to a single in-progress check.
+		let inFlight = false;
+		// `fired` makes fireReminder idempotent. It must be re-checked AFTER the
+		// condition await returns: a timeout can fire while one tick is parked
+		// on `await checkCondition`. Without this, the parked tick wakes up,
+		// sees the condition true, and fires a second (un-flagged) followUp on
+		// top of the TIMED OUT one.
+		let fired = false;
+
 		const tick = async () => {
+			if (fired) return;
 			// Not yet at the time gate? Wait.
 			if (gate && Date.now() < gate) return;
-			// Hard timeout cap.
+			// Hard timeout cap. Must be checked before the inFlight guard:
+			// otherwise a condition that never returns pins inFlight true and
+			// timeout_minutes never trips.
 			if (r.timeoutMs && Date.now() - Math.max(startedAt, gate || startedAt) > r.timeoutMs) {
+				fired = true;
 				fireReminder(ctx, r, { timeout: true });
 				return;
 			}
+			if (inFlight) return;
 			// No condition = pure time trigger: fire once gate is reached.
 			if (!r.condition) {
+				fired = true;
 				fireReminder(ctx, r);
 				return;
 			}
-			// Condition present: poll it.
-			if (await checkCondition(r)) fireReminder(ctx, r);
+			// Condition present: poll it. Re-check `fired` after the await — a
+			// timeout may have fired while we were waiting.
+			inFlight = true;
+			try {
+				if (await checkCondition(r) && !fired) {
+					fired = true;
+					fireReminder(ctx, r);
+				}
+			} finally {
+				inFlight = false;
+			}
 		};
 
 		// Run first tick quickly, then on interval.
 		tick();
 		const iv = setInterval(tick, intervalMs);
-		track(r.id, () => clearInterval(iv));
+		track(r.id, () => {
+			clearInterval(iv);
+			const child = activeChildren.get(r.id);
+			if (child) {
+				activeChildren.delete(r.id);
+				try { child.kill("SIGTERM"); } catch { /* already exited */ }
+			}
+		});
 	}
 
 	function addReminder(ctx: ExtensionContext, r: Reminder): Reminder {
