@@ -1,6 +1,7 @@
-# pi-agents-goal-workflow
+# pi-goal-kit
 
-Four cooperating extensions for [Pi](https://pi.dev). The design center is
+**Goal-gated workflow for [Pi](https://pi.dev)** — four cooperating
+extensions. The design center is
 **gated-goal**: a five-phase loop that pins the acceptance bar out of the
 agent's reach, keeps it self-driving mid-task, and gates completion behind an
 adversarial review. The other three (`reminder-hook`, `todo`, `subagent`)
@@ -23,15 +24,15 @@ Two ideas run through all four:
 ## Install
 
 ```bash
-pi install git:github.com/garnetlyx/pi-agents-goal-workflow
+pi install git:github.com/garnetlyx/pi-goal-kit
 ```
 
 Update, pin, or install project-local:
 
 ```bash
 pi update --extensions
-pi install git:github.com/garnetlyx/pi-agents-goal-workflow@<tag>
-pi install -l git:github.com/garnetlyx/pi-agents-goal-workflow
+pi install git:github.com/garnetlyx/pi-goal-kit@<tag>
+pi install -l git:github.com/garnetlyx/pi-goal-kit
 ```
 
 Pi auto-discovers `extensions/*/index.ts` and enables them by default after
@@ -153,8 +154,8 @@ If you prefer to manage the checkout yourself (or are contributing), clone it
 and link each extension into Pi's agent directory:
 
 ```bash
-git clone https://github.com/garnetlyx/pi-agents-goal-workflow.git
-CLONE_DIR="$PWD/pi-agents-goal-workflow"
+git clone https://github.com/garnetlyx/pi-goal-kit.git
+CLONE_DIR="$PWD/pi-goal-kit"
 AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 mkdir -p "$AGENT_DIR/extensions"
 for e in gated-goal subagent todo reminder-hook; do

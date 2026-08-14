@@ -1,5 +1,5 @@
 {
-  "name": "pi-agents-goal-workflow",
+  "name": "pi-goal-kit",
   "version": "0.1.0",
   "description": "A wait-aware extension set for Pi: gated-goal plan-act-review loop, subagent delegation, todo tracking, and reminder hooks.",
   "type": "module",
@@ -7,11 +7,11 @@
   "keywords": ["pi-package"],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/garnetlyx/pi-agents-goal-workflow.git"
+    "url": "git+https://github.com/garnetlyx/pi-goal-kit.git"
   },
-  "homepage": "https://github.com/garnetlyx/pi-agents-goal-workflow",
+  "homepage": "https://github.com/garnetlyx/pi-goal-kit",
   "bugs": {
-    "url": "https://github.com/garnetlyx/pi-agents-goal-workflow/issues"
+    "url": "https://github.com/garnetlyx/pi-goal-kit/issues"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
