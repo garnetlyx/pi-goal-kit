@@ -16,8 +16,10 @@
  *
  * Persistence:
  *   Reminders live under pi's agent directory (getAgentDir()) so they survive
- *   /reload and pi restarts. They are re-armed on session_start;
- *   time-based reminders already due fire immediately.
+ *   /reload and pi restarts. They are re-armed on session_start; time-based
+ *   reminders already due fire immediately, but conditions are NOT re-evaluated
+ *   at that moment — a persisted predicate must not be replayed just because
+ *   the session came back up. Their first check is one poll interval later.
  *
  * Tool:
  *   set_reminder  — schedule one reminder
@@ -220,7 +222,17 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	function arm(ctx: ExtensionContext, r: Reminder): void {
+	/**
+	 * Start polling one reminder.
+	 *
+	 * `immediate` decides whether the predicate runs right now or only after the
+	 * first poll interval. A condition is arbitrary shell, so a freshly armed
+	 * reminder checks at once (the agent expects an instant answer if it is
+	 * already satisfied), but re-arming an existing one on session_start must
+	 * NOT: that would re-run every persisted predicate on every restart /
+	 * reload, executing whatever side effects they carry, unprompted.
+	 */
+	function arm(ctx: ExtensionContext, r: Reminder, { immediate }: { immediate: boolean }): void {
 		const startedAt = Date.now();
 		const intervalMs = Math.max(1, (r.pollSeconds ?? DEFAULT_POLL_SECONDS)) * 1000;
 
@@ -271,8 +283,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		};
 
-		// Run first tick quickly, then on interval.
-		tick();
+		if (immediate) tick();
 		const iv = setInterval(tick, intervalMs);
 		track(r.id, () => {
 			clearInterval(iv);
@@ -288,7 +299,7 @@ export default function (pi: ExtensionAPI) {
 		const all = loadReminders(ctx.sessionManager.getSessionId());
 		all.push(r);
 		saveReminders(ctx.cwd, ctx.sessionManager.getSessionId(), all);
-		arm(ctx, r);
+		arm(ctx, r, { immediate: true });
 		pi.events.emit("wait:active", { source: "reminder-hook", id: r.id });
 		return r;
 	}
@@ -304,11 +315,18 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setWidget?.("reminder-hook", undefined);
 		const pending = loadReminders(ctx.sessionManager.getSessionId());
 		for (const r of pending) {
-			// Pure time reminder already due → fire immediately on reload.
+			// Pure time reminder already due → fire immediately on reload. That is
+			// a clock trigger with no side effects of its own, unlike a condition.
 			if (!r.condition && r.when && r.when <= Date.now()) {
 				fireReminder(ctx, r);
 			} else {
-				arm(ctx, r);
+				// Do not re-run the predicate here: wait out one poll interval.
+				arm(ctx, r, { immediate: false });
+				// Re-announce the wait. It is held in memory by whoever listens
+				// (the todo nudge), so without this a restored reminder looks like
+				// nothing is pending and the agent gets nudged while it is in fact
+				// legitimately waiting.
+				pi.events.emit("wait:active", { source: "reminder-hook", id: r.id });
 			}
 		}
 		if (pending.length && ctx.hasUI) {
@@ -329,6 +347,7 @@ export default function (pi: ExtensionAPI) {
 			"Schedule a reminder that wakes you up later by sending your `message` back to you as a new user message. Use this whenever you'd otherwise block, sleep, or busy-poll.",
 			"",
 			"Provide a `condition` (a shell command — exit 0 means done) and/or `at` (absolute time) / `in_minutes`.",
+			"`condition` is polled repeatedly until it succeeds, so write a pure test. Anything with side effects (writing files, deploying, posting) will happen once per poll — do that in the work you resume with, not in the predicate.",
 			"",
 			"Which shell runs `condition`: on macOS/Linux it is `bash`. On Windows the extension prefers bash if",
 			"available (Git Bash / WSL) and otherwise falls back to PowerShell. Write the predicate in the dialect",

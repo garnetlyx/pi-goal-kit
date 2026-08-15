@@ -71,6 +71,19 @@ Reminders are stored per session under
 re-arms every pending reminder. Pure-time reminders already due fire
 immediately on the next start. Timers are cleaned up on `session_shutdown`.
 
+Two details of re-arming matter:
+
+- **Conditions are not re-evaluated at startup.** `arm()` takes an `immediate`
+  flag: true when the tool first arms a reminder (the agent expects an instant
+  answer if the condition already holds), false on restore. A predicate is
+  arbitrary shell, so ticking it on every `session_start` would replay whatever
+  side effects it carries — once per restart, unprompted. Restored reminders
+  wait out one poll interval first.
+- **`wait:active` is re-emitted.** Whoever consumes it (the todo nudge) holds
+  it in memory only, so a restored reminder that stayed silent would look like
+  nothing is pending, and the agent would be nudged while it is in fact
+  legitimately waiting.
+
 ## Why one generic tool
 
 Every "wait for X" reduces to a shell predicate. Time, PIDs, files, URLs,

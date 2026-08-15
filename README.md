@@ -87,7 +87,9 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │ agent calls freeze_plan(outcome, verification,
                                    │   constraints, quality, todos)
                                    │ → frozen prompt hashed + persisted
-                                   │ → todos created (via followUp instruction)
+                                   │   (+ archived as a session entry)
+                                   │ → todo list REPLACED with the frozen
+                                   │   items (todo:replace event)
                                    ▼
                                  P3 act  ◄───────────────────┐
                                    │ agent works the todos   │
@@ -104,10 +106,11 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │   EITHER verdict — a    │
                                    │   review that ran is    │
                                    │   a spent iteration     │
-                                   │ >= maxIter? ─► exit: max iteration reached
+                                   │ line starting with
                                    │ <promise>DONE</promise>?
-                                   │     ├─ no → edits ──────┤
-                                   │     └─ yes → P5         │
+                                   │     ├─ no → >= maxIter? ─► exit: max
+                                   │     │        else edits ─┤  iteration
+                                   │     └─ yes → P5 (always) │  reached
                                    ▼                         │
                                  P5 verify                   │
                                    │ main agent re-runs the  │
@@ -117,11 +120,15 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │   ├─ confirm_done ─► exit: done
                                    │   └─ reject_done ───────┘
                                    │      (no extra charge — P4
-                                   │       already spent this one)
+                                   │       already spent this one;
+                                   │       if the budget is gone,
+                                   │       exits: max iteration reached)
 ```
 
-P4's reviewer gets no write or edit tools; P5 makes the main agent re-run the
-frozen verification itself. The second gate exists because end-to-end testing
+P4's reviewer gets no write or edit tools and starts without the project's
+`AGENTS.md`/`CLAUDE.md`, so the code under review cannot rewrite the standard
+it is reviewed against; P5 makes the main agent re-run the frozen verification
+itself. The second gate exists because end-to-end testing
 caught a reviewer rubber-stamping work that provably failed its own frozen
 verification. Iteration is symmetric — the counter is charged when a review
 completes, whatever its verdict, so "reviewer not satisfied" and "reviewer said

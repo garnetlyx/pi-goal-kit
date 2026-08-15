@@ -29,7 +29,9 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │ agent calls freeze_plan(outcome, verification,
                                    │   constraints, quality, todos)
                                    │ → frozen prompt hashed + persisted
-                                   │ → todos created (via followUp instruction)
+                                   │   (+ archived as a session entry)
+                                   │ → todo list REPLACED with the frozen
+                                   │   items (todo:replace event)
                                    ▼
                                  P3 act  ◄───────────────────┐
                                    │ agent works the todos   │
@@ -46,10 +48,11 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │   EITHER verdict — a    │
                                    │   review that ran is    │
                                    │   a spent iteration     │
-                                   │ >= maxIter? ─► exit: max iteration reached
+                                   │ line starting with
                                    │ <promise>DONE</promise>?
-                                   │     ├─ no → edits ──────┤
-                                   │     └─ yes → P5         │
+                                   │     ├─ no → >= maxIter? ─► exit: max
+                                   │     │        else edits ─┤  iteration
+                                   │     └─ yes → P5 (always) │  reached
                                    ▼                         │
                                  P5 verify                   │
                                    │ main agent re-runs the  │
@@ -59,7 +62,9 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │   ├─ confirm_done ─► exit: done
                                    │   └─ reject_done ───────┘
                                    │      (no extra charge — P4
-                                   │       already spent this one)
+                                   │       already spent this one;
+                                   │       if the budget is gone,
+                                   │       exits: max iteration reached)
 ```
 
 Two exit-success paths converge at `confirm_done`. Three abort paths:
@@ -164,8 +169,14 @@ plus `todos` (array of `{text, status?}`).
   blocks, deterministic order, what `extractSection` later parses).
 - Hashes it (`hashPrompt`, sha256), stores both in state.
 - Flips `phase` to `act`, persists.
-- Sends a followUp telling the agent to create the todos via the todo tool and
-  start acting.
+- Archives `{prompt, hash}` as a `gated-goal-frozen` session entry
+  (`pi.appendEntry`) — a second store the integrity check can recover from.
+- Emits `todo:replace` with the frozen items, which **replaces** the todo list
+  wholesale (see `extensions/todo/snapshot.ts`). Asking the model to add them
+  instead appended to whatever it had already written down during PLAN, so a
+  freeze routinely doubled the list and jammed the all-todos-done gate.
+- Sends a followUp confirming the list and telling the agent to start acting
+  without re-adding anything.
 
 Only valid while `phase === "plan"`. Elsewhere returns isError.
 
@@ -186,8 +197,11 @@ the reason back as feedback ("you rejected the reviewer's DONE as a
 rubber-stamp ... apply the fix, then stop").
 
 It does **not** touch `reviewsCompleted`: reaching VERIFY already charged the
-iteration in P4, so incrementing here would double-count. The cap is re-checked
-when the next review completes.
+iteration in P4, so incrementing here would double-count. It **does** enforce
+the cap: if the charged iteration was the last one, `reject_done` exits with
+"max iteration reached" instead of returning to ACT. This is the only place the
+cap can end an approved review, because P4 always lets a DONE verdict through
+to VERIFY.
 
 ## Reviewer (`reviewer.ts`)
 
@@ -199,32 +213,50 @@ when the next review completes.
   extension's nudge stays silent while a review runs
 - spawns with `PI_SUBAGENT_CHILD=1` (set by `runChild`) → **cannot dispatch**
 - uses `reviewerPermissions` = read/grep/find/ls/bash
+- runs with `--no-context-files` (`contextFiles: false` → `runChild`), so the
+  reviewed project's own `AGENTS.md` / `CLAUDE.md` cannot rewrite the review
+  standard. Those files load regardless of project trust, so trust settings are
+  not a substitute. Ordinary `dispatch` still inherits them by default.
 - has a 1200s hard timeout (`runChild` SIGTERM→SIGKILL); on timeout it is
   treated as a crash: `runReviewCycle` catches, flips back to `act`, notifies.
   No exit on timeout.
 
 The review system prompt embeds the frozen prompt verbatim and dictates the
 output contract:
-- output `<promise>DONE</promise>` + a one-line summary **only if fully
-  satisfied**;
-- otherwise list concrete required changes, no promise tag.
+- **start a line** with `<promise>DONE</promise>`, followed by a one-line
+  summary, **only if fully satisfied**;
+- otherwise list concrete required changes, and do not write the tag at all.
 
-Promise detection is whitespace-tolerant: `/<promise>\s*DONE\s*<\/promise>/i`.
+`isApproved()` implements that contract: fenced code blocks are dropped, then
+the tag must open a line (whitespace-tolerant inside the tag). A bare substring
+test used to read "do not output `<promise>DONE</promise>` until the tests
+pass", or a fenced example, as approval — and silently dropped the required
+changes with it. On top of that, only a child that exited cleanly
+(`status === "done"`) can approve; a timed-out or crashed review is never a
+verdict, however its truncated output happens to end.
 
 ## Hash integrity
 
-`verifiedFrozenPrompt(state)` recomputes sha256 of `state.frozenPrompt` at
+`verifiedFrozenPrompt(ctx, state)` recomputes sha256 of `state.frozenPrompt` at
 every `runReview`:
 
 - match → use the stored prompt, `tampered: false`.
-- mismatch → still use the stored prompt, but flag `tampered: true`. The flag
-  surfaces in the P4 feedback note ("frozen prompt integrity check flagged —
-  archived version used").
+- mismatch → look for the `gated-goal-frozen` session entry written by
+  `freeze_plan`, take the newest one that still hashes to its own recorded
+  hash, and review **that** (`tampered: true, restored: true`).
+- mismatch with no intact archive → use the stored prompt as-is
+  (`restored: false`). Both cases surface as a note on the P4 feedback.
 
-**Mismatch never exits the gate.** Exiting on mismatch would let an attacker
-tamper with the prompt to abort the workflow. There is no "separate original"
-to restore from — the persisted `(prompt, hash)` pair is the source of truth,
-and the hash is the authoritative one. The flag is purely informational.
+**Mismatch never exits the gate.** Exiting on mismatch would let anyone abort
+the workflow by editing a file. Recovery is what the archive buys: the state
+file under the agent dir is no longer the only copy, and the two live in
+different stores.
+
+What this does *not* do: stop a determined edit. Anything that can write the
+state file can rewrite `frozenHash` alongside `frozenPrompt`, and a
+synchronized rewrite is self-consistent by construction. The check catches an
+inconsistent pair — corruption, a partial edit, a stale copy — not an
+adversary.
 
 ## Transition rule (P3 → P4)
 
@@ -237,10 +269,12 @@ else:
     // stay in act; the todo extension nudges on incomplete todos
 ```
 
-`allTodosDone(ctx)` scans the current session branch for the latest `todo`
-tool result and checks every item is `done`.
+`allTodosDone(ctx)` reads the branch via the shared `readTodoSnapshot()`
+(`extensions/todo/snapshot.ts` — the same read model the todo extension uses,
+covering both `todo` tool results and `todo-state` replacement entries) and
+checks every item is `done`.
 
-If the branch contains no `todo` result at all, it falls back to
+If the branch contains no todo state at all, it falls back to
 `frozenHash && reviewsCompleted > 0`:
 
 - **Before the first review** that is false — you cannot review what was never
@@ -264,10 +298,16 @@ keeps the loop spinning without special-casing.
 concluded, so "reviewer not satisfied" and "reviewer said DONE, main agent then
 rejected it" cost the same. `reject_done` deliberately adds nothing on top.
 
-Immediately after each increment, `reviewsCompleted >= maxIteration` → exit
-"max iteration reached". On the DONE path this check runs *before* handing off
-to VERIFY, so the agent never burns a turn verifying a run that is already out
-of budget. `maxIteration = N` therefore permits up to N reviews.
+The cap is checked after the increment on the **rejection** path only: a
+reviewer that asks for changes with no budget left exits "max iteration
+reached". An approving review always proceeds to VERIFY, however many
+iterations are left — otherwise the last allowed review could never finish the
+goal, and `maxIteration = 1` would make success unreachable outright. If VERIFY
+then rejects that approval and the budget is gone, `reject_done` exits with the
+same reason.
+
+`maxIteration = N` therefore permits up to N reviews, each of which can reach
+VERIFY.
 
 ## Cross-extension cooperation
 

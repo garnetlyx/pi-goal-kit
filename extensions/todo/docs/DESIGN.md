@@ -46,9 +46,31 @@ todo({ action: "add"|"list"|"set"|"remove"|"clear", text?, id?, status? })
 - `list` — returns current state
 
 State is carried in the tool result's `details` field. `session_start` and
-`session_tree` scan the current branch's `todo` tool results in order and
-reconstruct `todos` / `nextId`, so the list is always correct for the active
-branch point.
+`session_tree` rebuild `todos` / `nextId` from the branch via
+`readTodoSnapshot()` (`snapshot.ts`), so the list is always correct for the
+active branch point.
+
+`snapshot.ts` is the shared read model: it walks the branch and takes the last
+of either a `todo` tool result or a `todo-state` custom entry. It is a pure
+module on purpose — Pi gives each extension entry point its own module
+instance, so shared *state* would split in two, but a shared *function* is
+fine. `gated-goal` uses the same function for its all-todos-done gate instead
+of keeping a second copy of the scan.
+
+## Wholesale replacement (`todo:replace`)
+
+```
+pi.events.emit("todo:replace", { source, items: [{text, status?}], ctx })
+```
+
+Replaces the entire list in one step, renumbering ids from 1, and persists the
+result with `pi.appendEntry("todo-state", …)` so it survives restarts and
+branch navigation exactly like a tool result.
+
+This exists for extensions that own a plan — `gated-goal`'s `freeze_plan` — and
+need the list to *be* that plan. Instructing the model to "now add these todos"
+instead appends them to whatever it wrote down earlier, which duplicates items
+and then jams gated-goal's all-todos-done gate.
 
 ## Widget
 
@@ -93,8 +115,12 @@ Any extension that represents a wait should emit these:
 
 | Extension | Emits `wait:active` | Emits `wait:done` |
 |-----------|---------------------|-------------------|
-| reminder-hook | on `set_reminder` arm | on fire / cancel / timeout |
+| reminder-hook | on `set_reminder` arm, and again on `session_start` re-arm | on fire / cancel / timeout |
 | subagent | on `dispatch` entry added | on child end / cancel |
+
+`activeWaits` is memory-only, so anything that survives a restart has to
+re-announce itself on `session_start` — otherwise the nudge fires during a
+perfectly legitimate wait.
 
 Adding a new wait-style extension only requires emitting the same two events —
 todo picks it up with no code change.

@@ -3,10 +3,9 @@
  *
  * State lives under pi's agent directory (getAgentDir()) so /reload and
  * restarts restore the workflow. The frozen review prompt is the immutable
- * source of truth;
- * the stored hash is recomputed at spawn time and, on mismatch, the archived
- * prompt is used verbatim (never exit on mismatch — that would let tampering
- * abort the gate).
+ * source of truth; the stored hash is recomputed at spawn time and, on
+ * mismatch, the copy archived in the session at freeze time is used instead
+ * (never exit on mismatch — that would let tampering abort the gate).
  */
 
 import * as crypto from "node:crypto";
@@ -93,17 +92,47 @@ export function buildFrozenPrompt(parts: { outcome: string; verification: string
 	].join("\n");
 }
 
+/** Custom session entry holding the plan as it was at freeze time. */
+export const FROZEN_ENTRY = "gated-goal-frozen";
+
+export interface FrozenArchive {
+	prompt: string;
+	hash: string;
+}
+
+/** Most recent archived copy of the frozen plan in this branch, if any. */
+function archivedPrompt(ctx: ExtensionContext): FrozenArchive | undefined {
+	let found: FrozenArchive | undefined;
+	for (const entry of ctx.sessionManager.getBranch()) {
+		const e = entry as any;
+		if (e.type !== "custom" || e.customType !== FROZEN_ENTRY) continue;
+		const data = e.data as FrozenArchive | undefined;
+		if (data?.prompt && data.hash === hashPrompt(data.prompt)) found = data;
+	}
+	return found;
+}
+
 /**
- * Read the frozen prompt, reporting whether it still matches its own hash.
+ * Read the frozen prompt, reporting whether the state file still matches its
+ * own hash.
  *
  * A mismatch means the persisted (prompt, hash) pair is inconsistent — the
- * prompt was edited without recomputing the hash. The stored prompt is the
- * only copy, so there is nothing to restore from; it is used either way and
- * the caller surfaces `tampered` as a warning. Mismatch deliberately does NOT
- * abort the run: exiting on mismatch would turn tampering into an escape hatch
- * out of the gate.
+ * prompt was edited without recomputing the hash. freeze_plan also archives
+ * the plan as a session entry, which is a separate store from this state file,
+ * so we recover the original from there and keep going. If no intact archive
+ * exists, the state file's prompt is used as-is and the caller surfaces the
+ * warning.
+ *
+ * Mismatch deliberately does NOT abort the run: exiting on mismatch would turn
+ * editing the plan into an escape hatch out of the gate. Note this catches an
+ * inconsistent pair, not a determined edit — anything that can write the state
+ * file can rewrite the hash alongside it.
  */
-export function verifiedFrozenPrompt(state: GatedGoalState): { prompt: string; tampered: boolean } {
-	const recomputed = hashPrompt(state.frozenPrompt);
-	return { prompt: state.frozenPrompt, tampered: recomputed !== state.frozenHash };
+export function verifiedFrozenPrompt(ctx: ExtensionContext, state: GatedGoalState): { prompt: string; tampered: boolean; restored: boolean } {
+	if (hashPrompt(state.frozenPrompt) === state.frozenHash) {
+		return { prompt: state.frozenPrompt, tampered: false, restored: false };
+	}
+	const archive = archivedPrompt(ctx);
+	if (archive) return { prompt: archive.prompt, tampered: true, restored: true };
+	return { prompt: state.frozenPrompt, tampered: true, restored: false };
 }

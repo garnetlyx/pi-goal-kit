@@ -7,25 +7,29 @@
  * P1 select-reviewer — pick a reviewer model (arg, or ui.select, or esc = main
  *   model), then ping it with "reply ok". Failure → abort.
  * P2 plan            — discuss with user; agent calls freeze_plan with the four
- *   sections + todos. Frozen prompt + hash persisted; todos created; → P3.
+ *   sections + todos. Frozen prompt + hash persisted; the todo list is replaced
+ *   wholesale with the frozen items (todo:replace event); → P3.
  * P3 act             — main agent works. On agent_settled:
  *     all todos done → P4 ; else todo nudge (handled by todo ext) keeps it in P3.
  * P4 review          — spawn reviewer with the immutable frozen prompt. Parse
  *   <promise>DONE</promise>:
- *     done  → P5 (the promise alone never exits the gate)
+ *     done  → P5 (the promise alone never exits the gate; an approving review
+ *             always gets its verify pass, even on the last iteration)
  *     edits → feed feedback to main agent, → P3. If reviewsCompleted reaches
  *             maxIteration before a done → exit (reason: max iteration reached).
  * P5 verify          — main agent re-runs the frozen verification itself and
  *   judges the output, because a reviewer can rubber-stamp:
  *     confirm_done → exit (reason: done)
- *     reject_done  → back to P3, costing one iteration like a failed review.
+ *     reject_done  → back to P3; on the last iteration it exits instead
+ *                    (reason: max iteration reached).
  *
  * Reviewer is a subagent: appears in /subagents, emits wait:active/done, and
  * cannot dispatch (PI_SUBAGENT_CHILD guard inherited from the runner).
  *
  * Hash integrity: the frozen prompt is re-checked against its hash at spawn
- * time; on mismatch it is still used and only flagged — never exit (a mismatch
- * must not become an escape hatch out of the gate).
+ * time; on mismatch the copy archived in the session at freeze time is reviewed
+ * instead and the agent is told — never exit (a mismatch must not become an
+ * escape hatch out of the gate).
  */
 
 import { dirname, join } from "node:path";
@@ -35,6 +39,7 @@ import { Type } from "typebox";
 import {
 	buildFrozenPrompt,
 	DEFAULT_MAX_ITERATION,
+	FROZEN_ENTRY,
 	type GatedGoalState,
 	hashPrompt,
 	load,
@@ -43,6 +48,7 @@ import {
 } from "./state.ts";
 import { pingReviewer, runReview } from "./reviewer.ts";
 import { availableModels } from "../subagent/models.ts";
+import { readTodoSnapshot, TODO_REPLACE_EVENT, type TodoReplaceEvent } from "../todo/snapshot.ts";
 
 /** Extract a `## Section` body from the frozen prompt. Returns "(not specified)" if absent. */
 function extractSection(prompt: string, name: string): string {
@@ -51,36 +57,26 @@ function extractSection(prompt: string, name: string): string {
 	return m ? m[1].trim() : "(not specified)";
 }
 
-interface TodoSnapshot {
-	id: number;
-	status: "todo" | "pending" | "done";
-}
-
-/** Scan session branch for the latest todo tool result (mirrors todo ext). */
-function latestTodos(ctx: ExtensionContext): TodoSnapshot[] {
-	for (let i = ctx.sessionManager.getBranch().length - 1; i >= 0; i--) {
-		const entry: any = ctx.sessionManager.getBranch()[i];
-		if (entry?.type !== "message") continue;
-		const msg = entry.message;
-		if (msg?.role === "toolResult" && msg.toolName === "todo") {
-			const todos = msg.details?.todos;
-			if (Array.isArray(todos)) return todos.map((t: any) => ({ id: t.id, status: t.status }));
-		}
-	}
-	return [];
-}
-
 function allTodosDone(ctx: ExtensionContext, state: GatedGoalState): boolean {
-	const todos = latestTodos(ctx);
+	const { todos } = readTodoSnapshot(ctx);
 	if (todos.length === 0) {
-		// Recovery case: after a restart the todo list lives in the old session
-		// branch and is no longer visible here. If we have a frozen plan AND
-		// at least one review has already run, the work was previously judged
-		// complete enough to enter review — treat that as "todos done" so the
-		// recovery nudge can re-trigger a fresh review instead of deadlocking.
+		// Recovery case: no list in this branch at all (e.g. the run was resumed
+		// from a point before the todos were written). If we have a frozen plan
+		// AND at least one review has already run, the work was previously
+		// judged complete enough to enter review — treat that as "todos done"
+		// so the recovery nudge can re-trigger a fresh review, not deadlock.
 		return !!state.frozenHash && state.reviewsCompleted > 0;
 	}
 	return todos.every((t) => t.status === "done");
+}
+
+/** Parenthetical appended to review feedback when the state file's plan and its
+ *  hash disagreed. Says which prompt the reviewer actually got. */
+function integrityNote(result: { tampered: boolean; restored: boolean }): string {
+	if (!result.tampered) return "";
+	return result.restored
+		? " (note: the stored plan no longer matched its hash; the copy archived at freeze time was reviewed instead)"
+		: " (note: the stored plan no longer matches its hash and no archived copy was found; it was reviewed as-is)";
 }
 
 function modelIdOf(ctx: ExtensionContext): string {
@@ -147,10 +143,12 @@ export default function (pi: ExtensionAPI) {
 		state.exitReason = reason;
 		save(ctx, state);
 		setStatus(ctx);
-		ctx.ui.notify(`gated-goal exited: ${reason}`, reason === "done" ? "info" : "warning");
+		// confirm_done passes "done — <note>", so match the prefix, not equality.
+		const succeeded = reason === "done" || reason.startsWith("done —");
+		ctx.ui.notify(`gated-goal exited: ${reason}`, succeeded ? "info" : "warning");
 		pi.sendUserMessage(
 			`🚪 Gated-goal exited — reason: ${reason}.` +
-			(reason === "done" ? " Reviewer approved with <promise>DONE</promise>." : ""),
+			(succeeded ? " Reviewer approved and you confirmed it." : ""),
 			{ deliverAs: "followUp" },
 		);
 	}
@@ -182,19 +180,17 @@ export default function (pi: ExtensionAPI) {
 				//
 				// Count this review against the budget NOW (a review that ran is a
 				// spent iteration regardless of outcome), so reviewer-DONE-then-reject
-				// and reviewer-rejects-directly consume budget symmetrically. If this
-				// pushes us to max, exit before the agent wastes a turn verifying.
+				// and reviewer-rejects-directly consume budget symmetrically. The cap
+				// is NOT enforced here: an approving review must always get its VERIFY
+				// pass, otherwise the last allowed iteration can never finish the goal
+				// (with maxIteration=1 the success path would be unreachable). The cap
+				// is re-checked in reject_done, i.e. only once VERIFY says no.
 				state.reviewsCompleted = reviewNumber;
-				save(ctx, state);
-				if (state.reviewsCompleted >= state.maxIteration) {
-					exitGate(ctx, "max iteration reached");
-					return;
-				}
 				state.phase = "verify";
 				save(ctx, state);
 				setStatus(ctx, "verifying");
 				const verificationSection = extractSection(state.frozenPrompt, "Verification");
-				const tamperNote = result.tampered ? " (note: frozen prompt integrity check flagged — archived version used)" : "";
+				const tamperNote = integrityNote(result);
 				pi.sendUserMessage(
 					`✅ Reviewer (iteration ${reviewNumber}) returned <promise>DONE</promise>${tamperNote}. ` +
 					`Before accepting, INDEPENDENTLY verify — reviewers can rubber-stamp. ` +
@@ -219,7 +215,7 @@ export default function (pi: ExtensionAPI) {
 			state.phase = "act";
 			save(ctx, state);
 			setStatus(ctx, `iteration ${state.reviewsCompleted}`);
-			const tamperNote = result.tampered ? " (note: frozen prompt integrity check flagged — archived version used)" : "";
+			const tamperNote = integrityNote(result);
 			pi.sendUserMessage(
 				`🔁 Reviewer (iteration ${state.reviewsCompleted}/${state.maxIteration}) was NOT satisfied${tamperNote}. Required changes:\n\n${result.output}\n\nApply these changes, then stop when done. The reviewer will run again automatically.`,
 				{ deliverAs: "followUp" },
@@ -333,7 +329,7 @@ export default function (pi: ExtensionAPI) {
 		name: "freeze_plan",
 		label: "Freeze gated-goal plan",
 		description: [
-			"Gated-goal PLAN phase only. Freezes the agreed plan into an immutable review prompt (hashed) and creates the work todos, then enters ACT phase.",
+			"Gated-goal PLAN phase only. Freezes the agreed plan into an immutable review prompt (hashed) and REPLACES the todo list with the work items given here, then enters ACT phase.",
 			"Only call after the user has explicitly confirmed the plan. Provide all four sections and the todo list.",
 		].join("\n"),
 		parameters: Type.Object({
@@ -344,7 +340,7 @@ export default function (pi: ExtensionAPI) {
 			todos: Type.Array(Type.Object({
 				text: Type.String(),
 				status: Type.Optional(Type.Union([Type.Literal("todo"), Type.Literal("pending"), Type.Literal("done")], { description: "Default 'todo'." })),
-			}), { description: "Work items; become the todo list for the ACT phase." }),
+			}), { description: "Work items. These REPLACE the current todo list — include everything ACT needs, and do not re-add them afterwards." }),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (state.phase !== "plan") {
@@ -355,15 +351,25 @@ export default function (pi: ExtensionAPI) {
 			state.frozenHash = hashPrompt(frozenPrompt);
 			state.phase = "act";
 			save(ctx, state);
+			// Archive the plan in the session too. The state file under the agent
+			// dir is then no longer the only copy, so a prompt that no longer
+			// matches its hash can be recovered instead of merely flagged.
+			pi.appendEntry(FROZEN_ENTRY, { prompt: frozenPrompt, hash: state.frozenHash });
 			setStatus(ctx, "acting");
 
-			// Seed the todo list via the todo tool through session context: we
-			// can't call another extension's tool directly, so instruct the agent.
+			// Land the todo list ourselves instead of asking the agent to type it
+			// out: it usually has its own list from the PLAN discussion already,
+			// and "now add these" appends to it — duplicate items then jam the
+			// all-todos-done gate (or get marked done to unjam it, which is the
+			// exact behavior this gate exists to prevent).
+			const replace: TodoReplaceEvent = { source: "gated-goal", items: params.todos, ctx };
+			pi.events.emit(TODO_REPLACE_EVENT, replace);
+
 			const todoLines = params.todos
 				.map((t, i) => `  ${i + 1}. ${t.text}`)
 				.join("\n");
 			pi.sendUserMessage(
-				`📋 Plan frozen (sha256 ${state.frozenHash.slice(0, 12)}…). Now create these todos via the todo tool and start ACTING:\n${todoLines}\n\nWork through them. When all are done and you stop, the reviewer runs automatically.`,
+				`📋 Plan frozen (sha256 ${state.frozenHash.slice(0, 12)}…). Your todo list has been replaced with the frozen one (${params.todos.length} item(s)) — do NOT add them again:\n${todoLines}\n\nStart ACTING. Mark each item done as you finish it. When all are done and you stop, the reviewer runs automatically.`,
 				{ deliverAs: "followUp" },
 			);
 			return { content: [{ type: "text", text: `Frozen. phase=act, hash=${state.frozenHash.slice(0, 12)}…` }] };
@@ -401,7 +407,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Reject reviewer approval",
 		description: [
 			"Gated-goal VERIFY phase only. Call when the reviewer returned <promise>DONE</promise> but your own verification shows the work does NOT actually satisfy the frozen plan (reviewer rubber-stamped).",
-			"Returns to ACT with your reasons as feedback. The iteration was already charged when the review ran, so this does not consume extra budget; the cap is re-checked after the next review.",
+			"Returns to ACT with your reasons as feedback. The iteration was already charged when the review ran, so this does not consume extra budget — but if that was the last allowed iteration, rejecting exits gated-goal (reason: max iteration reached).",
 		].join("\n"),
 		parameters: Type.Object({
 			reason: Type.String({ description: "What failed your independent verification. Becomes the feedback to ACT." }),
@@ -411,9 +417,15 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: `reject_done only valid in VERIFY phase (current: ${state.phase}).` }], isError: true };
 			}
 			// The iteration was already counted when the review ran (entering VERIFY
-			// bumped reviewsCompleted). Rejecting does not double-count; it just
-			// returns control to ACT. The max-iteration check on re-entry to ACT
-			// is handled by the next review cycle.
+			// bumped reviewsCompleted). Rejecting does not double-count. This is
+			// where the budget cap lands for the approve-then-reject path: the
+			// review cycle deliberately lets an approving review through to VERIFY
+			// even on the last iteration, so the cap can only end the run here,
+			// after the main agent has said the approval was wrong.
+			if (state.reviewsCompleted >= state.maxIteration) {
+				exitGate(ctx, "max iteration reached");
+				return { content: [{ type: "text", text: `Rejected — no iterations left (${state.reviewsCompleted}/${state.maxIteration}). Gated-goal exited.` }] };
+			}
 			state.phase = "act";
 			save(ctx, state);
 			setStatus(ctx, `iteration ${state.reviewsCompleted}`);

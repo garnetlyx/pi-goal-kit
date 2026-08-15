@@ -16,12 +16,15 @@
  * the common case where a local model stops mid-work or forgets to mark work
  * done.
  *
- * Cross-extension coordination uses the pi.events bus with two events:
- *   wait:active  { source: string, id: string }  — something is being waited on
- *   wait:done    { source: string, id: string }  — the wait ended
- * Any extension that represents a wait should emit these so the todo nudge
- * stays silent while the agent is legitimately blocked. Sources seen so far:
- * "reminder-hook", "subagent".
+ * Cross-extension coordination uses the pi.events bus:
+ *   wait:active  { source, id }  — something is being waited on
+ *   wait:done    { source, id }  — the wait ended
+ *   todo:replace { source, items, ctx } — replace the whole list atomically
+ * Any extension that represents a wait should emit the first two so the todo
+ * nudge stays silent while the agent is legitimately blocked (sources seen so
+ * far: "reminder-hook", "subagent"). The third is for an extension that owns a
+ * plan and needs the list to match it exactly instead of asking the model to
+ * re-type it; see snapshot.ts for the read model both sides share.
  */
 
 import { dirname, join } from "node:path";
@@ -29,14 +32,15 @@ import { fileURLToPath } from "node:url";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-
-type TodoStatus = "todo" | "pending" | "done";
-
-interface Todo {
-	id: number;
-	text: string;
-	status: TodoStatus;
-}
+import {
+	buildTodos,
+	readTodoSnapshot,
+	type Todo,
+	type TodoReplaceEvent,
+	type TodoStatus,
+	TODO_REPLACE_EVENT,
+	TODO_STATE_ENTRY,
+} from "./snapshot.ts";
 
 interface TodoDetails {
 	action: string;
@@ -87,18 +91,9 @@ export default function (pi: ExtensionAPI) {
 	const activeWaits = new Set<string>(); // `${source}:${id}`
 
 	const reconstructState = (ctx: ExtensionContext) => {
-		todos = [];
-		nextId = 1;
-		for (const entry of ctx.sessionManager.getBranch()) {
-			if (entry.type !== "message") continue;
-			const msg = (entry as any).message;
-			if (!msg || msg.role !== "toolResult" || msg.toolName !== "todo") continue;
-			const details = msg.details as TodoDetails | undefined;
-			if (details && Array.isArray(details.todos)) {
-				todos = details.todos.map((t) => ({ ...t }));
-				nextId = details.nextId ?? nextId;
-			}
-		}
+		const snapshot = readTodoSnapshot(ctx);
+		todos = snapshot.todos;
+		nextId = snapshot.nextId;
 		renderWidget(ctx);
 	};
 
@@ -129,6 +124,22 @@ export default function (pi: ExtensionAPI) {
 	pi.events.on("wait:done", (data) => {
 		const { source, id } = (data ?? {}) as { source?: string; id?: string };
 		if (source && id) activeWaits.delete(`${source}:${id}`);
+	});
+
+	// Atomic whole-list replacement, for extensions that own a plan (gated-goal
+	// freezing one). Asking the model to "now add these todos" instead appends
+	// to whatever it already wrote down, producing duplicates that then jam the
+	// all-todos-done gate. The new list is persisted as a session entry so it
+	// survives restarts and branch navigation like a tool result would.
+	pi.events.on(TODO_REPLACE_EVENT, (data) => {
+		const { items, ctx } = (data ?? {}) as Partial<TodoReplaceEvent>;
+		if (!Array.isArray(items) || !ctx) return;
+		const snapshot = buildTodos(items);
+		todos = snapshot.todos;
+		nextId = snapshot.nextId;
+		pi.appendEntry(TODO_STATE_ENTRY, snapshot);
+		resetNudgeSig();
+		renderWidget(ctx);
 	});
 
 	// The nudge: if the agent settles with incomplete todos and nothing is being

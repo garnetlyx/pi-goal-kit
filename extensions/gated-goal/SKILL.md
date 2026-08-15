@@ -30,13 +30,15 @@ Discuss the goal with the user until they explicitly confirm. Then call
 - `verification` — commands/tools to check success (e.g. `npm test`, curl)
 - `constraints` — what must not happen (files not to touch, data not to alter)
 - `quality` — bars (unit tests, CI green, etc.)
-- `todos` — work items, become the ACT-phase todo list
+- `todos` — work items. These **replace** your todo list, so include everything
+  ACT needs and do not re-add them afterwards.
 
 `freeze_plan` hashes the plan and enters ACT. **Only call it after explicit
 user confirmation.** The frozen prompt is immutable for the rest of the run.
 
 ### P3 — act
-Work the todos. When you stop:
+Work the todos (they are already there — freeze_plan created them). When you
+stop:
 - if all todos are done → the reviewer runs automatically (→ P4)
 - if todos remain → the todo nudge fires; keep going (stay in P3)
 
@@ -46,13 +48,14 @@ So: mark items done as you finish, and stop only when the work is complete.
 The reviewer subagent re-checks the work against the **frozen** plan and runs
 the verification commands. The iteration counter ticks on either outcome — a
 review that ran is spent regardless of its verdict. Then:
-- It outputs `<promise>DONE</promise>` → control passes to you for VERIFY (P5).
-  **Do not exit yet** — reviewers can rubber-stamp.
+- It starts a line with `<promise>DONE</promise>` → control passes to you for
+  VERIFY (P5), even if that was the last allowed iteration. **Do not exit yet**
+  — reviewers can rubber-stamp.
 - It lists required changes → they come back to you as a follow-up; go back to
   P3. The next review is a **fresh** reviewer context (only the frozen plan
   carries over, not prior review chatter).
 
-If the counter reaches `maxIteration` without a confirmed completion →
+If a review asks for changes and the counter has reached `maxIteration` →
 gated-goal exits, reason **max iteration reached**.
 
 ### P5 — verify (your independent check)
@@ -63,18 +66,18 @@ actually checking. Then:
 - `confirm_done` (optional note) → gated-goal exits, reason **done**.
 - `reject_done` (reason) → your reason becomes ACT feedback; back to P3. The
   iteration was already charged when the review ran, so rejecting costs no
-  extra budget — but it does mean this round produced no progress toward the
-  cap being lifted.
+  extra budget — but if that was the last allowed iteration, rejecting ends the
+  run (**max iteration reached**).
 
 This is the final gate. The reviewer's promise is necessary but not
 sufficient — your own verification is what closes the loop.
 
 ## Integrity
 
-The frozen plan is hashed and stored. At every review the hash is recomputed;
-on mismatch the stored plan is still used and the mismatch is only flagged in
-the feedback — it never exits the gate, so editing the plan cannot be used to
-abort the workflow.
+The frozen plan is hashed and stored, and archived separately in the session.
+At every review the hash is recomputed; on mismatch the archived copy is
+reviewed instead and you are told in the feedback. A mismatch never exits the
+gate, so editing the plan cannot be used to abort the workflow.
 
 ## Aborting
 
@@ -83,8 +86,9 @@ abort the workflow.
 ## Notes
 
 - The reviewer gets read-only tools plus bash (so it can run tests and `git
-  diff`) and no write/edit tools. It is a subagent, so it obeys the same
-  `wait:active`/`wait:done` protocol as dispatch — todo nudges stay silent
-  while it runs.
+  diff`) and no write/edit tools, and starts without the project's
+  `AGENTS.md`/`CLAUDE.md` — its standard is the frozen plan alone. It is a
+  subagent, so it obeys the same `wait:active`/`wait:done` protocol as dispatch
+  — todo nudges stay silent while it runs.
 - You can still dispatch your own subagents in P3 for exploration/implementation
   (subject to constraints you wrote into the plan).

@@ -5,6 +5,10 @@
  * render status and outputs. The scheduler enforces per-group concurrency with
  * semaphores shared across all dispatch invocations (so two rapid dispatch
  * calls can't bypass a group's limit).
+ *
+ * The registry instance is realm-scoped (Symbol.for), not module-scoped — see
+ * the note above its export for why a plain module singleton silently splits
+ * in two across extension entry points.
  */
 
 import type { Message } from "@earendil-works/pi-ai";
@@ -131,7 +135,15 @@ class Registry {
 	}
 }
 
-export const registry = new Registry();
+// Process-wide singleton, NOT a module-level one. Pi loads every extension
+// entry point through its own Jiti loader with `moduleCache: false`, so
+// `new Registry()` at module scope produces a *different* instance per
+// importing extension — gated-goal's reviewer would register into a registry
+// that subagent's panel / dispatch_status / watchdog / shutdown never read.
+// Symbol.for keys the instance on the shared realm instead.
+const REGISTRY_KEY = Symbol.for("pi-goal-kit.subagent.registry.v1");
+const globalStore = globalThis as Record<symbol, unknown>;
+export const registry: Registry = (globalStore[REGISTRY_KEY] ??= new Registry()) as Registry;
 
 export function genId(): string {
 	return `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;

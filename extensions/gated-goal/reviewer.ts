@@ -8,11 +8,17 @@
  *   runReview     — full review (P4). Returns { done, output, tampered }.
  *
  * Hash integrity: the frozen prompt is re-checked against its hash at spawn
- * time. On mismatch it is still used and only flagged (never exit on mismatch —
- * that would turn editing the plan into an escape hatch out of the gate).
+ * time. On mismatch the copy archived in the session at freeze time is used and
+ * the caller is told (never exit on mismatch — that would turn editing the plan
+ * into an escape hatch out of the gate).
  *
- * Promise parsing: reviewer output containing <promise>DONE</promise>
- * (whitespace-tolerant) marks the review as passed.
+ * Promise parsing: the review passes only when the child finished cleanly AND
+ * <promise>DONE</promise> appears as a line of its own outside any code fence.
+ * Mentioning the tag inline (quoting or negating it) is not a verdict.
+ *
+ * Context isolation: reviewer children run with --no-context-files, so the
+ * project's own AGENTS.md / CLAUDE.md cannot rewrite the review standard. The
+ * frozen plan is the reviewer's whole spec.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -20,7 +26,24 @@ import { genId, type DispatchEntry, registry, splitModel } from "../subagent/sch
 import { runChild } from "../subagent/runner.ts";
 import { type GatedGoalState, REVIEWER_PERMISSIONS, verifiedFrozenPrompt } from "./state.ts";
 
-const PROMISE_RE = /<promise>\s*DONE\s*<\/promise>/i;
+/** The tag counts only where it opens a line — see isApproved(). */
+const PROMISE_LINE_RE = /^<promise>\s*DONE\s*<\/promise>/i;
+const FENCED_BLOCK_RE = /^[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?^[ \t]*\1[^\n]*$/gm;
+
+/**
+ * Did the reviewer *issue* the promise, as opposed to merely mentioning it?
+ *
+ * A substring test cannot tell the two apart: a rejection like "do not output
+ * <promise>DONE</promise> until the tests pass", or an example inside a code
+ * fence, both read as approval and silently discard the reviewer's required
+ * changes. So: drop fenced blocks, then require the tag to *start* a line.
+ * Approvals open with the verdict (a one-line summary may follow it on the
+ * same line); mentions of it are embedded in a sentence.
+ */
+export function isApproved(output: string): boolean {
+	const prose = output.replace(FENCED_BLOCK_RE, "");
+	return prose.split(/\r?\n/).some((line) => PROMISE_LINE_RE.test(line.trim()));
+}
 
 function buildReviewerEntry(opts: { name: string; model: string; task: string; group: string }): DispatchEntry {
 	const { provider } = splitModel(opts.model);
@@ -65,6 +88,7 @@ export async function pingReviewer(pi: ExtensionAPI, ctx: ExtensionContext, mode
 			permissions: REVIEWER_PERMISSIONS,
 			systemPrompt: "You are a connectivity probe. Reply with exactly: ok",
 			timeoutSec,
+			contextFiles: false,
 		});
 		if (entry.status !== "done") {
 			throw new Error(`reviewer probe ${entry.status}${entry.errorMessage ? ": " + entry.errorMessage : ""}`);
@@ -81,7 +105,10 @@ export async function pingReviewer(pi: ExtensionAPI, ctx: ExtensionContext, mode
 export interface ReviewResult {
 	done: boolean;
 	output: string;
+	/** The state file's prompt no longer matched its hash. */
 	tampered: boolean;
+	/** …and the archived copy from freeze time was used instead. */
+	restored: boolean;
 	exitCode?: number;
 	status: string;
 }
@@ -91,7 +118,7 @@ export interface ReviewResult {
  * Resolves when the child exits. Caller decides transitions based on `done`.
  */
 export async function runReview(pi: ExtensionAPI, ctx: ExtensionContext, state: GatedGoalState, reviewNumber: number, timeoutSec = 1200): Promise<ReviewResult> {
-	const { prompt, tampered } = verifiedFrozenPrompt(state);
+	const { prompt, tampered, restored } = verifiedFrozenPrompt(ctx, state);
 
 	const name = `reviewer-${reviewNumber}`;
 	const entry = buildReviewerEntry({ name, model: state.reviewerModel, task: `Review #${reviewNumber} against frozen plan`, group: "default" });
@@ -110,8 +137,9 @@ export async function runReview(pi: ExtensionAPI, ctx: ExtensionContext, state: 
 		"--- END FROZEN PLAN ---",
 		"",
 		"Output rules:",
-		"- If and only if you are fully satisfied that every outcome is met, every verification passes, every constraint honored, and every quality bar cleared: output exactly `<promise>DONE</promise>` and a one-line summary. Nothing else needs the promise tag.",
-		"- Otherwise, output a concrete list of changes the main agent must make. Reference specific files/commands/constraints. Do NOT output the promise tag.",
+		"- If and only if you are fully satisfied that every outcome is met, every verification passes, every constraint honored, and every quality bar cleared: START a line with <promise>DONE</promise>, followed by a one-line summary.",
+		"- Otherwise, output a concrete list of changes the main agent must make. Reference specific files/commands/constraints.",
+		"- A line beginning with that tag IS the approval verdict. If you are not approving, do not write those characters at all — not to quote them, not to negate them (\"do not output ...\"), not inside a code block.",
 	].join("\n");
 
 	try {
@@ -120,17 +148,24 @@ export async function runReview(pi: ExtensionAPI, ctx: ExtensionContext, state: 
 			permissions: state.reviewerPermissions,
 			systemPrompt,
 			timeoutSec,
+			// The reviewer's standard is the frozen plan, not the reviewed
+			// project's own AGENTS.md / CLAUDE.md.
+			contextFiles: false,
 		});
 	} finally {
 		pi.events.emit("wait:done", { source: "subagent", id: entry.id });
 	}
 
 	const output = entry.finalOutput ?? entry.errorMessage ?? "(no output)";
-	const done = PROMISE_RE.test(output);
+	// A review that timed out, crashed, or was cancelled has truncated output;
+	// whatever it managed to print is not a verdict. Only a cleanly finished
+	// child can approve.
+	const done = entry.status === "done" && isApproved(output);
 	return {
 		done,
 		output,
 		tampered,
+		restored,
 		exitCode: entry.exitCode,
 		status: entry.status,
 	};

@@ -89,11 +89,17 @@ export async function runChild(opts: {
 	systemPrompt?: string;
 	timeoutSec: number;
 	signal?: AbortSignal;
+	/** Load the project's AGENTS.md / CLAUDE.md in the child (default true).
+	 *  Set false for children whose spec must not be rewritable by the project
+	 *  they are inspecting — a reviewer, for instance. Note that context files
+	 *  load regardless of project trust, so trust settings cannot substitute. */
+	contextFiles?: boolean;
 }): Promise<DispatchEntry> {
-	const { pi: _pi, ctx, entry, modelArg, permissions, systemPrompt, timeoutSec, signal } = opts;
+	const { pi: _pi, ctx, entry, modelArg, permissions, systemPrompt, timeoutSec, signal, contextFiles } = opts;
 	const e = entry;
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session", "--model", modelArg];
+	if (contextFiles === false) args.push("--no-context-files");
 	const tools = permissionsToTools(permissions);
 	if (tools) args.push("--tools", tools.join(","));
 

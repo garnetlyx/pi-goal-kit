@@ -57,13 +57,25 @@ pi.sendUserMessage(result, { deliverAs: "followUp" })
 `PI_SUBAGENT_CHILD=1` makes the extension a no-op in children, preventing
 nested dispatch.
 
+## One registry per process, not per module
+
+`scheduler.ts` keys its registry on `Symbol.for("pi-goal-kit.subagent.registry.v1")`
+under `globalThis`. Pi loads every extension entry point through its own Jiti
+loader with `moduleCache: false`, so a plain `export const registry = new
+Registry()` is instantiated once per *importing extension*: gated-goal's
+reviewer would register into an object that this extension's panel,
+`dispatch_status`, watchdog, and shutdown kill loop never look at. Reviewers
+were invisible and unkillable for exactly that reason. Anything else that has
+to be shared across entry points needs the same treatment (or the `pi.events`
+bus, which Pi does share).
+
 ## Files
 
 | Path | Purpose |
 |---|---|
 | `extensions/subagent/index.ts` | tools, watchdog, child guard, default system prompt |
 | `extensions/subagent/scheduler.ts` | live registry, subscriptions, semaphores |
-| `extensions/subagent/runner.ts` | child spawn, JSON capture, timeout, tool gate |
+| `extensions/subagent/runner.ts` | child spawn, JSON capture, timeout, tool gate, context-file gate |
 | `extensions/subagent/panel.ts` | bordered `/subagents` overlay |
 | `extensions/subagent/config.ts` | `subagent.json` loader/seeder |
 | `subagent.json` | single user-owned subagent configuration (roles + optional prompts) |
