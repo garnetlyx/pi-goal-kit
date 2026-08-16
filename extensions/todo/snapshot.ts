@@ -35,6 +35,16 @@ export interface TodoSnapshot {
 export const TODO_STATE_ENTRY = "todo-state";
 /** Event that replaces the whole list atomically. Payload: TodoReplaceEvent. */
 export const TODO_REPLACE_EVENT = "todo:replace";
+/** Event emitted after todo owns the settle decision for the current turn. */
+export const TODO_SETTLED_EVENT = "todo:settled";
+
+export type TodoSettleDisposition = "continue" | "wait" | "review";
+
+export interface TodoSettledEvent {
+	/** `continue`: a nudge was sent; `wait`: external work is active; `review`: no continuation was scheduled. */
+	disposition: TodoSettleDisposition;
+	ctx: ExtensionContext;
+}
 
 export interface TodoReplaceEvent {
 	/** Who asked for the replacement (for logging/debugging). */

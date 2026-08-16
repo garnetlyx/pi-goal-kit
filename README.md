@@ -93,11 +93,9 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    ▼
                                  P3 act  ◄───────────────────┐
                                    │ agent works the todos   │
-                                   │ on agent_settled:       │
-                                   │   all todos done?       │
-                                   │     ├─ no  → stay P3    │
-                                   │     │  (todo ext nudges)│
-                                   │     └─ yes → P4         │
+                                   │ todo owns settled state:│
+                                   │  nudge/wait → stay P3   │
+                                   │  no continuation → P4   │
                                    ▼                         │
                                  P4 review                   │
                                    │ spawn reviewer subagent │
@@ -142,18 +140,21 @@ instruction is a strong default, not an enforced boundary.
 
 ## How they cooperate
 
-`subagent`, `reminder-hook`, and `todo` share one event contract:
+`subagent`, `reminder-hook`, `todo`, and `gated-goal` share event contracts:
 
 ```
 wait:active  { source: string, id: string }   — something is being waited on
 wait:done    { source: string, id: string }   — wait resolved
+todo:settled { disposition, ctx }             — continue | wait | review
 ```
 
-`subagent` emits per running child, `reminder-hook` per armed reminder, and
-`todo` suppresses its nudge while any wait is active. `gated-goal` runs its
-reviewer on the subagent stack, so the reviewer shows up in `/subagents`, emits
-the same events, and inherits `PI_SUBAGENT_CHILD=1` (no sub-subagents). Split
-the bundle and both the wait-aware nudge and the adversarial review break.
+`subagent` emits per running child and `reminder-hook` per armed reminder.
+`todo` alone combines list, nudge de-duplication, and active waits into the
+settle disposition; gated-goal consumes it instead of duplicating todo logic.
+Gated-goal runs its reviewer on the subagent stack, so the reviewer shows up in
+`/subagents`, emits the same wait events, and inherits `PI_SUBAGENT_CHILD=1`
+(no sub-subagents). Split the bundle and both the wait-aware nudge and the
+adversarial review break.
 
 ## Manual setup
 

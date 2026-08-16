@@ -37,12 +37,16 @@ Discuss the goal with the user until they explicitly confirm. Then call
 user confirmation.** The frozen prompt is immutable for the rest of the run.
 
 ### P3 — act
-Work the todos (they are already there — freeze_plan created them). When you
-stop:
-- if all todos are done → the reviewer runs automatically (→ P4)
-- if todos remain → the todo nudge fires; keep going (stay in P3)
+Work the todos (they are already there — freeze_plan created them). The frozen
+plan must contain at least one todo before ACT can begin. When you stop, the
+todo extension alone decides what follows:
+- a fresh incomplete list gets one continuation nudge (stay in P3)
+- an active external wait stays in P3 without a nudge
+- if no continuation is scheduled — including an empty list, an all-done list,
+  or an unchanged incomplete list that was already nudged — review starts (→ P4)
 
-So: mark items done as you finish, and stop only when the work is complete.
+So: mark items done as you finish. You may clear the list when the work is
+complete; reviewer feedback can create fresh todos for the next ACT round.
 
 ### P4 — review
 The reviewer subagent re-checks the work against the **frozen** plan and runs

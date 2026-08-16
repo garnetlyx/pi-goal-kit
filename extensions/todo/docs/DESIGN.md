@@ -15,11 +15,13 @@ agent uses todo tool → state stored in tool-result details
 
 agent_settled fires:
   incomplete = todos where status != "done"
-  if incomplete.length > 0 AND activeWaits.size === 0:
+  if activeWaits.size > 0:
+     → emit todo:settled { disposition: "wait" }
+  else if incomplete set is fresh:
      → pi.sendUserMessage(nudge, { deliverAs: "followUp" })
-     → ctx.ui.notify("... — nudging agent", "warning")
+     → emit todo:settled { disposition: "continue" }
   else:
-     → silent (nothing to do, or legitimately waiting)
+     → emit todo:settled { disposition: "review" }
 ```
 
 The `followUp` delivery queues behind any active conversation and triggers a
@@ -50,12 +52,12 @@ State is carried in the tool result's `details` field. `session_start` and
 `readTodoSnapshot()` (`snapshot.ts`), so the list is always correct for the
 active branch point.
 
-`snapshot.ts` is the shared read model: it walks the branch and takes the last
-of either a `todo` tool result or a `todo-state` custom entry. It is a pure
-module on purpose — Pi gives each extension entry point its own module
-instance, so shared *state* would split in two, but a shared *function* is
-fine. `gated-goal` uses the same function for its all-todos-done gate instead
-of keeping a second copy of the scan.
+`snapshot.ts` is the shared contract module: its read model walks the branch
+and takes the last of either a `todo` tool result or a `todo-state` custom
+entry; it also exports the replacement and settle event names and payload
+types. It is pure on purpose — Pi gives each extension entry point its own
+module instance, so shared *state* would silently split, while shared functions
+and event contracts remain safe.
 
 ## Wholesale replacement (`todo:replace`)
 
@@ -69,8 +71,8 @@ branch navigation exactly like a tool result.
 
 This exists for extensions that own a plan — `gated-goal`'s `freeze_plan` — and
 need the list to *be* that plan. Instructing the model to "now add these todos"
-instead appends them to whatever it wrote down earlier, which duplicates items
-and then jams gated-goal's all-todos-done gate.
+instead appends them to whatever it wrote down earlier, producing duplicate
+work and misleading progress.
 
 ## Widget
 
@@ -96,6 +98,19 @@ incomplete set each time it fires. If `agent_settled` fires again with the
 same incomplete signature, the nudge is suppressed — the agent already saw it
 and chose to stop, do not spam. Any mutation through the `todo` tool resets
 the signature so the next stop nudges freshly.
+
+After deciding, todo emits the shared `todo:settled` event exported by
+`snapshot.ts`:
+
+| Disposition | Condition |
+|-------------|-----------|
+| `continue` | a fresh incomplete-list nudge was sent |
+| `wait` | `activeWaits.size > 0` |
+| `review` | no continuation was scheduled: empty/all-done, or an unchanged incomplete list already nudged |
+
+Workflow extensions consume this event instead of independently reading todo
+state or reproducing the nudge and wait rules. This makes todo the single owner
+of settle behavior and avoids extension-load-order races.
 
 ## Cross-extension active-wait protocol
 

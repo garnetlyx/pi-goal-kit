@@ -9,8 +9,9 @@
  * P2 plan            — discuss with user; agent calls freeze_plan with the four
  *   sections + todos. Frozen prompt + hash persisted; the todo list is replaced
  *   wholesale with the frozen items (todo:replace event); → P3.
- * P3 act             — main agent works. On agent_settled:
- *     all todos done → P4 ; else todo nudge (handled by todo ext) keeps it in P3.
+ * P3 act             — todo owns the agent_settled decision: a fresh incomplete
+ *   list gets one continuation nudge, an active external wait stays in P3, and
+ *   every settle with no scheduled continuation enters P4.
  * P4 review          — spawn reviewer with the immutable frozen prompt. Parse
  *   <promise>DONE</promise>:
  *     done  → P5 (the promise alone never exits the gate; an approving review
@@ -48,26 +49,18 @@ import {
 } from "./state.ts";
 import { pingReviewer, runReview } from "./reviewer.ts";
 import { availableModels } from "../subagent/models.ts";
-import { readTodoSnapshot, TODO_REPLACE_EVENT, type TodoReplaceEvent } from "../todo/snapshot.ts";
+import {
+	TODO_REPLACE_EVENT,
+	TODO_SETTLED_EVENT,
+	type TodoReplaceEvent,
+	type TodoSettledEvent,
+} from "../todo/snapshot.ts";
 
 /** Extract a `## Section` body from the frozen prompt. Returns "(not specified)" if absent. */
 function extractSection(prompt: string, name: string): string {
 	const re = new RegExp(`^## ${name}\\s*\\n([\\s\\S]*?)(?=\\n^## |$)`, "m");
 	const m = prompt.match(re);
 	return m ? m[1].trim() : "(not specified)";
-}
-
-function allTodosDone(ctx: ExtensionContext, state: GatedGoalState): boolean {
-	const { todos } = readTodoSnapshot(ctx);
-	if (todos.length === 0) {
-		// Recovery case: no list in this branch at all (e.g. the run was resumed
-		// from a point before the todos were written). If we have a frozen plan
-		// AND at least one review has already run, the work was previously
-		// judged complete enough to enter review — treat that as "todos done"
-		// so the recovery nudge can re-trigger a fresh review, not deadlock.
-		return !!state.frozenHash && state.reviewsCompleted > 0;
-	}
-	return todos.every((t) => t.status === "done");
 }
 
 /** Parenthetical appended to review feedback when the state file's plan and its
@@ -117,8 +110,8 @@ export default function (pi: ExtensionAPI) {
 	// If we come back up while phase === "review", the previous reviewer child
 	// was killed mid-run (e.g. a pi restart or /reload). The reviewsCompleted
 	// counter was already bumped, so we must NOT silently re-enter review
-	// (that would double-count). Flip back to act so the next agent_settled
-	// with all todos done re-triggers a fresh review. Also nudge the agent so
+	// (that would double-count). Flip back to act so todo's next settled
+	// disposition can re-trigger a fresh review. Also nudge the agent so
 	// it knows the last review was lost and it should re-present completion.
 	pi.on("session_start", async (_e, ctx) => {
 		if (state.phase === "review") {
@@ -223,18 +216,20 @@ export default function (pi: ExtensionAPI) {
 		})();
 	}
 
-	// ---- P3→P4 transition + VERIFY anti-stall on settle ----
+	// ---- P3→P4 transition ----
+	// Todo is the sole owner of settle/nudge/wait semantics. Gated-goal consumes
+	// its disposition instead of duplicating todo state or de-duplication logic.
+	pi.events.on(TODO_SETTLED_EVENT, (data) => {
+		const { disposition, ctx } = (data ?? {}) as Partial<TodoSettledEvent>;
+		if (!ctx) return;
+		if (!ready) reload(ctx);
+		if (state.phase !== "act" || !state.frozenHash) return;
+		if (disposition === "review") runReviewCycle(ctx);
+	});
+
+	// ---- VERIFY anti-stall on settle ----
 	pi.on("agent_settled", async (_e, ctx) => {
 		if (!ready) reload(ctx);
-		if (state.phase === "act") {
-			// Need todos frozen AND all done to enter review.
-			if (!state.frozenHash) return;
-			if (allTodosDone(ctx, state)) {
-				runReviewCycle(ctx);
-			}
-			// else: todo extension nudges; stay in act.
-			return;
-		}
 		if (state.phase === "verify") {
 			// Anti-stall: the agent finished a turn in VERIFY without calling
 			// confirm_done / reject_done (those tools flip phase away from verify).
@@ -340,11 +335,14 @@ export default function (pi: ExtensionAPI) {
 			todos: Type.Array(Type.Object({
 				text: Type.String(),
 				status: Type.Optional(Type.Union([Type.Literal("todo"), Type.Literal("pending"), Type.Literal("done")], { description: "Default 'todo'." })),
-			}), { description: "Work items. These REPLACE the current todo list — include everything ACT needs, and do not re-add them afterwards." }),
+			}), { minItems: 1, description: "Work items. At least one is required. These REPLACE the current todo list — include everything ACT needs, and do not re-add them afterwards." }),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (state.phase !== "plan") {
 				return { content: [{ type: "text", text: `freeze_plan only valid in PLAN phase (current: ${state.phase}).` }], isError: true };
+			}
+			if (params.todos.length === 0 || params.todos.some((todo) => !todo.text.trim())) {
+				return { content: [{ type: "text", text: "freeze_plan requires at least one non-blank todo before entering ACT." }], isError: true };
 			}
 			const frozenPrompt = buildFrozenPrompt(params);
 			state.frozenPrompt = frozenPrompt;
@@ -359,9 +357,8 @@ export default function (pi: ExtensionAPI) {
 
 			// Land the todo list ourselves instead of asking the agent to type it
 			// out: it usually has its own list from the PLAN discussion already,
-			// and "now add these" appends to it — duplicate items then jam the
-			// all-todos-done gate (or get marked done to unjam it, which is the
-			// exact behavior this gate exists to prevent).
+			// and "now add these" appends to it, producing duplicate work and
+			// misleading progress.
 			const replace: TodoReplaceEvent = { source: "gated-goal", items: params.todos, ctx };
 			pi.events.emit(TODO_REPLACE_EVENT, replace);
 
@@ -369,7 +366,7 @@ export default function (pi: ExtensionAPI) {
 				.map((t, i) => `  ${i + 1}. ${t.text}`)
 				.join("\n");
 			pi.sendUserMessage(
-				`📋 Plan frozen (sha256 ${state.frozenHash.slice(0, 12)}…). Your todo list has been replaced with the frozen one (${params.todos.length} item(s)) — do NOT add them again:\n${todoLines}\n\nStart ACTING. Mark each item done as you finish it. When all are done and you stop, the reviewer runs automatically.`,
+				`📋 Plan frozen (sha256 ${state.frozenHash.slice(0, 12)}…). Your todo list has been replaced with the frozen one (${params.todos.length} item(s)) — do NOT add them again:\n${todoLines}\n\nStart ACTING. Mark items done as you finish them. When work is complete, stop with an all-done or cleared list; todo will nudge once for fresh incomplete work, and review starts when no continuation is scheduled.`,
 				{ deliverAs: "followUp" },
 			);
 			return { content: [{ type: "text", text: `Frozen. phase=act, hash=${state.frozenHash.slice(0, 12)}…` }] };

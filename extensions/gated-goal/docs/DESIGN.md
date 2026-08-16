@@ -35,11 +35,9 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    ▼
                                  P3 act  ◄───────────────────┐
                                    │ agent works the todos   │
-                                   │ on agent_settled:       │
-                                   │   all todos done?       │
-                                   │     ├─ no  → stay P3    │
-                                   │     │  (todo ext nudges)│
-                                   │     └─ yes → P4         │
+                                   │ todo owns settled state:│
+                                   │  nudge/wait → stay P3   │
+                                   │  no continuation → P4   │
                                    ▼                         │
                                  P4 review                   │
                                    │ spawn reviewer subagent │
@@ -75,7 +73,7 @@ manual `/gated-goal-exit`.
 
 | Path | Purpose |
 |------|---------|
-| `extensions/gated-goal/index.ts` | `/gated-goal`, `/gated-goal-exit`, `/gated-goal-status` commands; `freeze_plan`, `confirm_done`, `reject_done` tools; `agent_settled` P3→P4 transition; `extractSection` helper |
+| `extensions/gated-goal/index.ts` | `/gated-goal`, `/gated-goal-exit`, `/gated-goal-status` commands; `freeze_plan`, `confirm_done`, `reject_done` tools; consumes todo's P3→P4 settle disposition; `extractSection` helper |
 | `extensions/gated-goal/reviewer.ts` | `pingReviewer` (P1 connectivity probe) + `runReview` (P4 spawn with hash verify + promise parse) |
 | `extensions/gated-goal/state.ts` | load/save the session state file; phase types (`idle|plan|act|review|verify`); frozen-prompt hashing; integrity check |
 | `extensions/gated-goal/SKILL.md` | agent-facing phase guide |
@@ -99,7 +97,7 @@ hardcoded, since it differs between a stock install and a bundled one.
 }
 ```
 
-- `phase` drives every transition; `agent_settled` and the tools all branch on it.
+- `phase` drives every transition; todo's settle event, `agent_settled` in VERIFY, and the tools branch on it.
 - `reviewsCompleted` increments once per completed review, on either verdict, so
   both kinds of "this iteration didn't close the loop" consume budget
   symmetrically. See [Iteration accounting](#iteration-accounting).
@@ -163,7 +161,7 @@ will falsely fail — raise the timeout in `pingReviewer` if that bites you.
 ### `freeze_plan` (P2 → P3)
 
 Parameters: `outcome`, `verification`, `constraints`, `quality` (all strings),
-plus `todos` (array of `{text, status?}`).
+plus `todos` (non-empty array of `{text, status?}` with non-blank text).
 
 - Builds the canonical frozen prompt via `buildFrozenPrompt` (four `## Section`
   blocks, deterministic order, what `extractSection` later parses).
@@ -171,10 +169,11 @@ plus `todos` (array of `{text, status?}`).
 - Flips `phase` to `act`, persists.
 - Archives `{prompt, hash}` as a `gated-goal-frozen` session entry
   (`pi.appendEntry`) — a second store the integrity check can recover from.
+- Rejects an empty array or any blank todo before changing state.
 - Emits `todo:replace` with the frozen items, which **replaces** the todo list
   wholesale (see `extensions/todo/snapshot.ts`). Asking the model to add them
   instead appended to whatever it had already written down during PLAN, so a
-  freeze routinely doubled the list and jammed the all-todos-done gate.
+  freeze routinely doubled the work list.
 - Sends a followUp confirming the list and telling the agent to start acting
   without re-adding anything.
 
@@ -260,36 +259,28 @@ adversary.
 
 ## Transition rule (P3 → P4)
 
-The `agent_settled` handler checks, while `phase === "act"`:
+`freeze_plan` requires at least one non-blank todo, so PLAN cannot enter ACT
+without an initial work list. After that, todo remains a work-control surface,
+not completion evidence: the agent may finish by marking every item done or by
+clearing the list, and reviewer feedback may add a fresh list for another ACT
+round.
 
-```
-if frozenHash is set AND all todos done:
-    runReviewCycle(ctx)   // → P4
-else:
-    // stay in act; the todo extension nudges on incomplete todos
-```
+Todo is the sole owner of `agent_settled`, incomplete-list de-duplication, and
+active-wait semantics. It emits the shared `todo:settled` contract exported by
+`extensions/todo/snapshot.ts`:
 
-`allTodosDone(ctx)` reads the branch via the shared `readTodoSnapshot()`
-(`extensions/todo/snapshot.ts` — the same read model the todo extension uses,
-covering both `todo` tool results and `todo-state` replacement entries) and
-checks every item is `done`.
+| Disposition | Meaning | Gated-goal action |
+|-------------|---------|-------------------|
+| `continue` | Todo sent one fresh incomplete-list follow-up | stay in ACT |
+| `wait` | A subagent, reminder, or other external wait is active | stay in ACT |
+| `review` | Todo scheduled no continuation | enter REVIEW |
 
-If the branch contains no todo state at all, it falls back to
-`frozenHash && reviewsCompleted > 0`:
-
-- **Before the first review** that is false — you cannot review what was never
-  planned, so a run whose agent never created the todos stalls in ACT until
-  the user nudges it.
-- **After a review has already run** it is true. This is the restart-recovery
-  case: the todo list lives in the pre-restart session branch and is no longer
-  visible here, but the work had already been judged complete enough to enter
-  review once. Treating it as "todos done" lets the recovery nudge re-trigger a
-  fresh review instead of deadlocking with no reachable todo state.
-
-This single rule covers both the first P3 pass and re-entry after review
-feedback: if the main agent doesn't reopen todos, they stay all-done, so the
-next stop re-triggers P4 automatically. Symmetry with P5→P3 (`reject_done`)
-keeps the loop spinning without special-casing.
+`review` therefore covers an empty list, an all-done list, and an unchanged
+incomplete list that already received its one nudge. Gated-goal does not read
+todo snapshots or reproduce those conditions; it listens for the disposition
+and calls `runReviewCycle(ctx)` only for `review` while `phase === "act"` and a
+frozen hash exists. This keeps the settle decision in one module and avoids
+handler-order races between independent `agent_settled` subscribers.
 
 ## Iteration accounting
 
@@ -313,10 +304,10 @@ VERIFY.
 
 Gated-goal composes the three earlier extensions:
 
-- **todo** — owns the todo list and the `agent_settled` nudge. Gated-goal reads
-  todos via session-branch scan (not a direct import) and relies on the nudge
-  to keep P3 alive. The reviewer's `wait:active` keeps the nudge silent during
-  P4/P5.
+- **todo** — owns the todo list plus all `agent_settled`, nudge de-duplication,
+  and active-wait decisions. Gated-goal consumes todo's exported
+  `todo:settled` disposition and never duplicates those rules. The reviewer's
+  `wait:active` keeps todo in `wait` while P4 is running.
 - **subagent** — reviewer is a subagent. Reuses `genId`, `registry`, `splitModel`,
   and `runChild`. Shows in `/subagents`.
 - **reminder-hook** — not used directly, but the `wait:active/wait:done` protocol
@@ -341,10 +332,9 @@ active, plus a phase hint (`acting`, `reviewing`, `verifying`,
   more.
 - **`availableModels` is best-effort.** If both scopedModels and registry
   enumeration fail, the picker is skipped and the main model is used silently.
-- **`freeze_plan` creates todos indirectly** — via a followUp instructing the
-  agent to call the `todo` tool, because the todo extension owns its session
-  entry schema. A misbehaving agent could skip this; P3 won't proceed without
-  todos, so it would just stall in act (recoverable via user nudge).
+- **`freeze_plan` requires and replaces todos atomically** — an empty array or
+  blank item is rejected before state changes, and `todo:replace` persists the
+  validated non-empty list before ACT work begins.
 - **State file is not concurrency-locked.** Single-agent assumption; fine for
   the intended interactive use.
 - **VERIFY is subjective by design.** The acceptance criterion for the

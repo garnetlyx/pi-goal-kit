@@ -60,7 +60,11 @@ actually done, then continuing the rest.
 
 The nudge stays silent while a subagent or reminder is in flight so it does
 not interrupt legitimate waits. The de-dup signature prevents repeat nudges
-when nothing has changed since the last one.
+when nothing has changed since the last one. After each settle, todo publishes
+its shared disposition for workflow extensions: `continue` when it sent a
+nudge, `wait` while external work is active, or `review` when it scheduled no
+continuation. Consumers must reuse that disposition rather than duplicate
+todo, wait, or nudge logic.
 
 ## Persistence
 

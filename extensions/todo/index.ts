@@ -37,8 +37,10 @@ import {
 	readTodoSnapshot,
 	type Todo,
 	type TodoReplaceEvent,
+	type TodoSettledEvent,
 	type TodoStatus,
 	TODO_REPLACE_EVENT,
+	TODO_SETTLED_EVENT,
 	TODO_STATE_ENTRY,
 } from "./snapshot.ts";
 
@@ -128,8 +130,8 @@ export default function (pi: ExtensionAPI) {
 
 	// Atomic whole-list replacement, for extensions that own a plan (gated-goal
 	// freezing one). Asking the model to "now add these todos" instead appends
-	// to whatever it already wrote down, producing duplicates that then jam the
-	// all-todos-done gate. The new list is persisted as a session entry so it
+	// to whatever it already wrote down, producing duplicate work. The new list
+	// is persisted as a session entry so it
 	// survives restarts and branch navigation like a tool result would.
 	pi.events.on(TODO_REPLACE_EVENT, (data) => {
 		const { items, ctx } = (data ?? {}) as Partial<TodoReplaceEvent>;
@@ -145,19 +147,27 @@ export default function (pi: ExtensionAPI) {
 	// The nudge: if the agent settles with incomplete todos and nothing is being
 	// waited on, push it to verify/continue.
 	pi.on("agent_settled", async (_event, ctx) => {
+		const settle = (disposition: TodoSettledEvent["disposition"]) => {
+			pi.events.emit(TODO_SETTLED_EVENT, { disposition, ctx } satisfies TodoSettledEvent);
+		};
 		const incomplete = todos.filter(isIncomplete);
 		if (incomplete.length === 0) {
 			lastNudgeSignature = "";
+			settle("review");
 			return;
 		}
 		if (activeWaits.size > 0) {
+			settle("wait");
 			return; // legitimately waiting — stay silent
 		}
 		// Avoid nudge loops: if the set of incomplete ids hasn't changed since the
 		// last nudge, the agent already saw it and chose to stop. Don't spam.
 		const sig = incomplete.map((t) => t.id).sort().join(",");
 		const countSig = `${incomplete.length}|${sig}`;
-		if (countSig === lastNudgeSignature) return;
+		if (countSig === lastNudgeSignature) {
+			settle("review");
+			return;
+		}
 		lastNudgeSignature = countSig;
 
 		const list = incomplete
@@ -173,6 +183,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`${incomplete.length} todos incomplete — nudging agent`, "warning");
 		}
 		pi.sendUserMessage(nudge, { deliverAs: "followUp" });
+		settle("continue");
 	});
 
 	// Reset the de-dup signature whenever the list changes, so a fresh stop
