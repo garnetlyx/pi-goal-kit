@@ -19,6 +19,11 @@ real output before closing the loop.
 
 ## State machine
 
+An interactive version of this diagram lives in
+[`state-machine.html`](./state-machine.html) — open it in a browser to drive the
+phases yourself and watch `state.json`, the iteration budget and the exit paths
+move together.
+
 ```
 idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │ ping "reply ok" (45s timeout)

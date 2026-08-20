@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gated-goal · state machine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#070b0f;
+  --ink-2:#0a1117;
+  --panel:#0c151c;
+  --panel-2:#0f1a22;
+  --line:#2b4453;
+  --line-soft:#1a2a35;
+  --cyan:#4fd6e8;
+  --amber:#ffb02e;
+  --green:#56d6a0;
+  --red:#ff6f5e;
+  --text:#cfe0ea;
+  --muted:#6d8998;
+  --font-display:'Chakra Petch',ui-sans-serif,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,monospace;
+  --font-sans:'IBM Plex Sans',ui-sans-serif,sans-serif;
+}
+
+*{box-sizing:border-box}
+html{ -webkit-text-size-adjust:100% }
+body{
+  margin:0;
+  background:var(--ink);
+  color:var(--text);
+  font-family:var(--font-mono);
+  font-size:13px;
+  line-height:1.5;
+  min-height:100vh;
+  background-image:
+    linear-gradient(rgba(79,214,232,.045) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(79,214,232,.045) 1px,transparent 1px),
+    linear-gradient(rgba(79,214,232,.022) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(79,214,232,.022) 1px,transparent 1px),
+    radial-gradient(120% 80% at 50% -10%,#12222c 0%,var(--ink) 62%);
+  background-size:96px 96px,96px 96px,16px 16px,16px 16px,100% 100%;
+}
+body::after{
+  content:'';position:fixed;inset:0;pointer-events:none;z-index:9;opacity:.05;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ── frame ─────────────────────────────────────────────── */
+.wrap{max-width:1480px;margin:0 auto;padding:28px 22px 60px}
+
+header.masthead{
+  display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;
+  padding-bottom:16px;margin-bottom:22px;
+  border-bottom:1px solid var(--line);
+  position:relative;
+}
+header.masthead::after{
+  content:'';position:absolute;left:0;bottom:-1px;width:170px;height:2px;background:var(--amber);
+}
+.masthead h1{
+  font-family:var(--font-display);font-weight:700;font-size:clamp(28px,4.6vw,52px);
+  letter-spacing:.02em;margin:0;line-height:.98;text-transform:uppercase;
+}
+.masthead h1 em{font-style:normal;color:var(--muted)}
+.masthead h1 b{font-weight:700;color:var(--amber)}
+.masthead .sub{
+  margin:8px 0 0;color:var(--muted);font-size:12px;letter-spacing:.06em;max-width:56ch;
+}
+.stamp{
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--muted);text-align:right;line-height:1.9;white-space:nowrap;
+}
+.stamp b{color:var(--cyan);font-weight:500}
+
+/* ── layout ────────────────────────────────────────────── */
+.deck{display:grid;grid-template-columns:minmax(0,1fr) 372px;gap:20px;align-items:start}
+@media (max-width:1080px){.deck{grid-template-columns:minmax(0,1fr)}}
+
+.panel{
+  background:
+    linear-gradient(180deg,rgba(79,214,232,.035),transparent 140px),
+    var(--panel);
+  border:1px solid var(--line-soft);
+  position:relative;
+}
+.panel::before,.panel::after{
+  content:'';position:absolute;width:9px;height:9px;pointer-events:none;
+  border:1px solid var(--line);
+}
+.panel::before{top:-1px;left:-1px;border-right:0;border-bottom:0;border-color:var(--cyan);opacity:.55}
+.panel::after{bottom:-1px;right:-1px;border-left:0;border-top:0;border-color:var(--cyan);opacity:.55}
+.panel__hd{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:9px 13px;border-bottom:1px solid var(--line-soft);
+  font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:var(--muted);
+}
+.panel__hd b{color:var(--text);font-weight:500;letter-spacing:.2em}
+.panel__bd{padding:14px}
+
+.col-r{display:flex;flex-direction:column;gap:20px;position:sticky;top:18px}
+@media (max-width:1080px){.col-r{position:static}}
+
+/* ── diagram ───────────────────────────────────────────── */
+.stage{padding:6px 4px 2px}
+svg#graph{display:block;width:100%;height:auto;overflow:visible}
+
+.node{cursor:pointer}
+.node__bg{fill:var(--panel-2);stroke:var(--line);stroke-width:1}
+.node__tag{font-family:var(--font-mono);font-size:10px;letter-spacing:.22em;fill:var(--muted)}
+.node__name{font-family:var(--font-display);font-weight:600;font-size:19px;letter-spacing:.05em;fill:var(--text)}
+.node__meta{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.1em;fill:var(--muted)}
+.node__count{font-family:var(--font-mono);font-size:10px;letter-spacing:.12em;fill:var(--cyan);
+  transform-box:fill-box;transform-origin:100% 50%}
+.node__count.is-tick{animation:tickPop .6s cubic-bezier(.16,.84,.44,1)}
+@keyframes tickPop{0%{fill:#fff;transform:scale(1.45)}100%{fill:var(--cyan);transform:none}}
+.node__pill{font-family:var(--font-display);font-weight:600;font-size:13px;letter-spacing:.12em;fill:var(--text);text-transform:uppercase}
+.tick{stroke:var(--cyan);stroke-width:1.2;fill:none;opacity:.32;pointer-events:none}
+
+.node:hover .node__bg{stroke:var(--cyan);fill:#12212b}
+.node:focus{outline:none}
+.node:focus-visible .node__bg{stroke:var(--cyan);stroke-dasharray:3 3}
+
+.node.is-seen .node__bg{stroke:#3f6273}
+.node.is-seen .node__name{fill:#e6f2f8}
+
+.node.is-sel .node__bg{stroke:var(--cyan)}
+.node.is-sel .tick{opacity:.9}
+
+.node.is-live .node__bg{fill:#1b1607;stroke:var(--amber);stroke-width:1.6}
+.node.is-live .node__name{fill:var(--amber)}
+.node.is-live .node__tag{fill:#c58c24}
+.node.is-live .tick{stroke:var(--amber);opacity:1}
+.node.is-live{filter:drop-shadow(0 0 12px rgba(255,176,46,.45))}
+
+/* standing aura on the live node — cheap, no filter animation */
+.node__aura{fill:none;stroke:var(--amber);stroke-width:1;opacity:0;pointer-events:none;
+  transform-box:fill-box;transform-origin:center}
+.node.is-live .node__aura{animation:aura 2.5s ease-in-out infinite}
+@keyframes aura{0%,100%{opacity:0;transform:scale(.984)}50%{opacity:.3;transform:scale(1.018)}}
+.exit.is-live .node__aura{stroke:var(--green)}
+.exit--bad.is-live .node__aura{stroke:var(--red)}
+
+/* arrival punch */
+.node.is-arrive .node__bg{animation:arrive .52s cubic-bezier(.16,.84,.44,1)}
+@keyframes arrive{0%{fill:#ffcf6b;stroke:#fff6e2;stroke-width:2.4}60%{stroke-width:1.8}100%{}}
+.exit.is-arrive .node__bg{animation-name:arriveG}
+@keyframes arriveG{0%{fill:#8ff0c6;stroke:#eafff6;stroke-width:2.4}100%{}}
+.exit--bad.is-arrive .node__bg{animation-name:arriveR}
+@keyframes arriveR{0%{fill:#ffb0a5;stroke:#fff0ee;stroke-width:2.4}100%{}}
+
+.halo{fill:none;stroke:var(--amber);stroke-width:1.6;pointer-events:none;
+  transform-box:fill-box;transform-origin:center;
+  animation:halo .66s cubic-bezier(.16,.84,.44,1) forwards}
+.halo--green{stroke:var(--green)}
+.halo--red{stroke:var(--red)}
+@keyframes halo{from{opacity:.9;transform:scale(1)}to{opacity:0;transform:scale(1.16)}}
+
+/* the packet that rides the active edge */
+.comet{fill:none;stroke:#ffd77e;stroke-width:3;stroke-linecap:round;opacity:0;pointer-events:none;
+  filter:drop-shadow(0 0 7px rgba(255,176,46,.95))}
+.head{fill:#fff6e0;opacity:0;pointer-events:none;filter:drop-shadow(0 0 9px rgba(255,190,70,1))}
+
+.exit.is-live .node__bg{fill:#0d1d17;stroke:var(--green)}
+.exit.is-live .node__pill{fill:var(--green)}
+.exit.is-live{filter:drop-shadow(0 0 12px rgba(86,214,160,.4))}
+.exit--bad.is-live .node__bg{fill:#1d0f0d;stroke:var(--red)}
+.exit--bad.is-live .node__pill{fill:var(--red)}
+.exit--bad.is-live{filter:drop-shadow(0 0 12px rgba(255,111,94,.4))}
+
+.edge{fill:none;stroke:var(--line);stroke-width:1.3;marker-end:url(#m-line)}
+.edge--exit{stroke:#3a4b45;stroke-dasharray:5 4;marker-end:url(#m-line)}
+.edge--manual{stroke:#4a3a3a;stroke-dasharray:2 5;marker-end:url(#m-line)}
+.edge.is-seen{stroke:#4a7285;marker-end:url(#m-seen)}
+.edge.is-live{stroke:var(--amber);stroke-width:2;marker-end:url(#m-amber);stroke-dasharray:9 7;animation:march .9s linear infinite;filter:drop-shadow(0 0 6px rgba(255,176,46,.45))}
+@keyframes march{to{stroke-dashoffset:-32}}
+
+.elabel{font-family:var(--font-mono);font-size:9.5px;letter-spacing:.08em;fill:#5d7c8c}
+.elabel--alt{fill:#6a5b4a}
+.frame-line{stroke:var(--line-soft);stroke-width:1;fill:none}
+.frame-txt{font-family:var(--font-mono);font-size:9px;letter-spacing:.24em;fill:#3d5665}
+
+/* ── inspector ─────────────────────────────────────────── */
+.insp__top{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px}
+.insp__name{font-family:var(--font-display);font-weight:700;font-size:22px;letter-spacing:.04em;text-transform:uppercase;margin:0}
+.insp__sub{color:var(--muted);font-size:11.5px;margin:0 0 12px;font-family:var(--font-sans);letter-spacing:.02em}
+.chip{
+  display:inline-block;font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;
+  padding:2px 7px;border:1px solid var(--line);color:var(--muted);
+}
+.chip--k{border-color:#2f5c52;color:var(--green)}
+.chip--a{border-color:#5c471f;color:var(--amber)}
+.insp__list{list-style:none;margin:0;padding:0;display:grid;gap:7px}
+.insp__list li{
+  padding-left:18px;position:relative;font-size:12px;color:#b3c8d5;font-family:var(--font-sans);
+}
+.insp__list li::before{
+  content:'';position:absolute;left:2px;top:7px;width:7px;height:7px;
+  border-left:1px solid var(--cyan);border-bottom:1px solid var(--cyan);opacity:.7;
+}
+.insp__list code{font-family:var(--font-mono);font-size:11px;color:var(--amber);background:rgba(255,176,46,.07);padding:0 3px}
+
+/* ── console ───────────────────────────────────────────── */
+.cfg{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+.cfg__lbl{font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+.stepper{display:flex;align-items:stretch;border:1px solid var(--line)}
+.stepper button{
+  width:28px;background:transparent;border:0;color:var(--text);font-family:var(--font-mono);
+  font-size:15px;cursor:pointer;line-height:1
+}
+.stepper button:hover:not(:disabled){background:var(--cyan);color:var(--ink)}
+.stepper button:disabled{color:#33454f;cursor:not-allowed}
+.stepper span{min-width:34px;text-align:center;padding:5px 0;color:var(--amber);border-inline:1px solid var(--line)}
+
+.evts{display:grid;gap:7px}
+.evt{
+  display:grid;grid-template-columns:20px 1fr;align-items:center;gap:10px;
+  width:100%;text-align:left;cursor:pointer;
+  background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+  font-family:var(--font-mono);font-size:12px;padding:8px 10px;
+  transition:background .12s,border-color .12s,transform .12s;
+}
+.evt:hover:not(:disabled){background:#16262f;border-color:var(--cyan);transform:translateX(2px)}
+.evt:disabled{opacity:.35;cursor:not-allowed}
+.evt kbd{
+  font-family:var(--font-mono);font-size:9px;color:var(--muted);border:1px solid var(--line-soft);
+  padding:1px 0;text-align:center;display:block;
+}
+.evt em{display:block;font-style:normal;font-size:9.5px;color:var(--muted);letter-spacing:.04em;margin-top:2px}
+.evt--go{border-color:#2f5c52}
+.evt--go:hover:not(:disabled){border-color:var(--green)}
+.evt--go strong{color:var(--green);font-weight:500}
+.evt--bad{border-color:#5c332f}
+.evt--bad:hover:not(:disabled){border-color:var(--red)}
+.evt--bad strong{color:var(--red);font-weight:500}
+.evt strong{font-weight:500;letter-spacing:.02em}
+.evt{animation:evtIn .32s cubic-bezier(.2,.9,.3,1) backwards}
+.evt:nth-child(2){animation-delay:.045s}
+.evt:nth-child(3){animation-delay:.09s}
+.evt:nth-child(4){animation-delay:.135s}
+@keyframes evtIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:none}}
+
+.hint{font-size:10.5px;color:#4d6675;letter-spacing:.04em;margin-top:12px;font-family:var(--font-mono)}
+
+/* ── scenarios ─────────────────────────────────────────── */
+.scen{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+.scen button{
+  background:transparent;border:1px solid var(--line-soft);color:var(--muted);
+  font-family:var(--font-mono);font-size:10.5px;letter-spacing:.06em;padding:7px 8px;cursor:pointer;
+  text-align:left;transition:.12s;
+}
+.scen button:hover:not(:disabled){border-color:var(--amber);color:var(--amber)}
+.scen button:disabled{opacity:.4;cursor:not-allowed}
+.scen button{position:relative;overflow:hidden}
+.scen button.playing{border-color:var(--amber);color:var(--amber);background:rgba(255,176,46,.08)}
+/* sits inside the amber border, in a dark track, so it stays readable */
+.scen button.playing::before{
+  content:'';position:absolute;left:1px;right:1px;bottom:1px;height:3px;background:#08131a;
+}
+.scen button.playing::after{
+  content:'';position:absolute;left:1px;bottom:1px;height:3px;background:#ffe6ac;
+  width:calc(var(--p,0) * (100% - 2px));transition:width .3s linear;
+  box-shadow:0 0 7px rgba(255,214,130,.9);
+}
+
+/* ── state json ────────────────────────────────────────── */
+.json{margin:0;font-family:var(--font-mono);font-size:11.5px;line-height:1.72;overflow-x:auto}
+.json .row{display:block;white-space:pre;padding:0 4px;border-left:2px solid transparent}
+.json .row.hot{background:rgba(255,176,46,.1);border-left-color:var(--amber);animation:hot 1.6s ease-out}
+@keyframes hot{0%{background:rgba(255,176,46,.3)}100%{background:rgba(255,176,46,.1)}}
+.k{color:var(--cyan)}
+.s{color:var(--amber)}
+.n{color:var(--green)}
+.nl{color:#5b7280}
+.p{color:#587585}
+
+/* ── trace ─────────────────────────────────────────────── */
+.trace{margin:0;max-height:224px;overflow-y:auto;font-size:11px;line-height:1.65;display:grid;gap:2px;
+  scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+.trace::-webkit-scrollbar{width:6px}
+.trace::-webkit-scrollbar-thumb{background:var(--line)}
+.trace li{list-style:none;display:grid;grid-template-columns:46px 1fr;gap:8px;color:#93aebb;
+  animation:traceIn .34s cubic-bezier(.2,.9,.3,1)}
+@keyframes traceIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:none}}
+.trace li.fresh{animation:traceIn .34s cubic-bezier(.2,.9,.3,1),freshFade 1.2s ease-out}
+@keyframes freshFade{0%{background:rgba(255,176,46,.16)}100%{background:transparent}}
+.trace li i{font-style:normal;color:#3f5866}
+.trace li.t-go span{color:var(--green)}
+.trace li.t-bad span{color:var(--red)}
+.trace li.t-amber span{color:var(--amber)}
+.trace li.t-sys span{color:var(--muted)}
+.trace li span b{font-weight:500;color:#dceaf2}
+
+/* ── legend + footer ───────────────────────────────────── */
+.legend{display:flex;flex-wrap:wrap;gap:6px 20px;padding:11px 14px;border-top:1px solid var(--line-soft);
+  font-size:10px;letter-spacing:.1em;color:var(--muted);text-transform:uppercase}
+.legend i{display:inline-block;width:22px;height:0;border-top:2px solid var(--line);vertical-align:middle;margin-right:7px}
+.legend i.lg-live{border-color:var(--amber)}
+.legend i.lg-seen{border-color:#4a7285}
+.legend i.lg-exit{border-top-style:dashed;border-color:#3a4b45}
+.legend i.lg-manual{border-top-style:dotted;border-color:#5c4444}
+
+footer{margin-top:34px;padding-top:16px;border-top:1px solid var(--line-soft);
+  display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;
+  font-size:10.5px;letter-spacing:.1em;color:#4d6675}
+footer a{color:var(--cyan);text-decoration:none;border-bottom:1px solid rgba(79,214,232,.3)}
+footer a:hover{border-bottom-color:var(--cyan)}
+
+@media (prefers-reduced-motion:reduce){
+  *{animation-duration:.001s!important;animation-iteration-count:1!important;transition-duration:.001s!important}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <div>
+    <h1><em>gated-goal</em> <b>/</b> state machine</h1>
+    <p class="sub">Five phases, two gates. An executable rendering of <code>DESIGN.md</code> — drive the run yourself and watch phase, iteration budget and persisted state move together.</p>
+  </div>
+  <div class="stamp">
+    <div>doc · <b>extensions/gated-goal</b></div>
+    <div>gates · <b>reviewer + main agent</b></div>
+    <div>source · <b>DESIGN.md § state machine</b></div>
+  </div>
+</header>
+
+<div class="deck">
+
+  <!-- ══ LEFT ══════════════════════════════════════════ -->
+  <div>
+    <section class="panel">
+      <div class="panel__hd"><b>transition graph</b><span id="phaseRead">phase — idle</span></div>
+      <div class="panel__bd stage">
+<svg id="graph" viewBox="0 0 800 830" role="img" aria-label="gated-goal five phase state machine">
+  <defs>
+    <marker id="m-line" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#2b4453"/></marker>
+    <marker id="m-seen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#4a7285"/></marker>
+    <marker id="m-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#ffb02e"/></marker>
+  </defs>
+
+  <!-- drafting frame -->
+  <path class="frame-line" d="M8,8 H40 M8,8 V40 M792,822 H760 M792,822 V790"/>
+  <text class="frame-txt" x="8" y="822">FIG.1 — PHASE FLOW</text>
+
+  <!-- ─── edges ─── -->
+  <path id="e-start"        class="edge" d="M330,55 V102"/>
+  <path id="e-ping-fail"    class="edge" d="M220,138 H206"/>
+  <path id="e-ping-ok"      class="edge" d="M330,171 V222"/>
+  <path id="e-freeze"       class="edge" d="M330,291 V350"/>
+  <path id="e-settle"       class="edge" d="M330,419 V478"/>
+  <path id="e-hold"         class="edge" d="M440,368 C500,354 500,406 442,392"/>
+  <path id="e-verdict"      class="edge" d="M330,547 V606"/>
+  <path id="e-changes"      class="edge" d="M220,528 H165 V376 H216"/>
+  <path id="e-reject"       class="edge" d="M220,656 H125 V400 H216"/>
+  <path id="e-max-review"   class="edge edge--exit" d="M440,500 H498 V568 H536"/>
+  <path id="e-max-verify"   class="edge edge--exit" d="M440,656 H474 V588 H536"/>
+  <path id="e-confirm"      class="edge edge--exit" d="M330,675 V749"/>
+  <path id="e-manual"       class="edge edge--manual" d="M762,112 V772 H724"/>
+
+  <!-- arrival halos render under the nodes -->
+  <g id="fxUnder"></g>
+
+  <!-- ─── edge labels ─── -->
+  <text class="elabel" x="342" y="82">/gated-goal [N] [model]</text>
+  <text class="elabel elabel--alt" x="203" y="108" text-anchor="end">ping fail · 45s</text>
+  <text class="elabel" x="342" y="200">reply “ok”</text>
+  <text class="elabel" x="342" y="325">freeze_plan() → hash · persist · todo:replace</text>
+  <text class="elabel" x="342" y="453">todo:settled = review</text>
+  <text class="elabel" x="500" y="381">continue / wait</text>
+  <text class="elabel" x="500" y="394">(todo owns this)</text>
+  <text class="elabel" x="342" y="582">&lt;promise&gt;DONE&lt;/promise&gt;</text>
+  <text class="elabel elabel--alt" x="147" y="452" text-anchor="middle" transform="rotate(-90 147 452)">changes requested · budget left</text>
+  <text class="elabel elabel--alt" x="108" y="566" text-anchor="middle" transform="rotate(-90 108 566)">reject_done()</text>
+  <text class="elabel elabel--alt" x="502" y="550">≥ maxIteration</text>
+  <text class="elabel elabel--alt" x="478" y="622">budget spent</text>
+  <text class="elabel" x="342" y="716">confirm_done()</text>
+  <text class="elabel elabel--alt" x="752" y="440" text-anchor="middle" transform="rotate(-90 752 440)">/gated-goal-exit · any phase</text>
+
+  <!-- ─── nodes ─── -->
+  <g class="node exit exit--bad" id="n-abortping" data-phase="abortping" tabindex="0" role="button" aria-label="abort to idle">
+    <rect class="node__bg" x="33" y="119" width="170" height="38" rx="19"/>
+    <text class="node__pill" x="118" y="143" text-anchor="middle">abort → idle</text>
+  </g>
+
+  <g class="node" id="n-idle" data-phase="idle" tabindex="0" role="button" aria-label="idle">
+    <rect class="node__bg" x="270" y="21" width="120" height="34" rx="17"/>
+    <text class="node__pill" x="330" y="43" text-anchor="middle">idle</text>
+  </g>
+
+  <g class="node" id="n-p1" data-phase="p1" tabindex="0" role="button" aria-label="phase 1 select reviewer">
+    <rect class="node__bg" x="220" y="105" width="220" height="66"/>
+    <text class="node__tag"  x="236" y="130">P1</text>
+    <text class="node__meta" x="424" y="130" text-anchor="end">ping 45s</text>
+    <text class="node__name" x="236" y="156">SELECT REVIEWER</text>
+  </g>
+
+  <g class="node" id="n-plan" data-phase="plan" tabindex="0" role="button" aria-label="phase 2 plan">
+    <rect class="node__bg" x="220" y="225" width="220" height="66"/>
+    <text class="node__tag"  x="236" y="250">P2</text>
+    <text class="node__meta" x="424" y="250" text-anchor="end">agent + user align</text>
+    <text class="node__name" x="236" y="276">PLAN</text>
+    <text class="node__meta" x="424" y="278" text-anchor="end">freeze_plan()</text>
+  </g>
+
+  <g class="node" id="n-act" data-phase="act" tabindex="0" role="button" aria-label="phase 3 act">
+    <rect class="node__bg" x="220" y="353" width="220" height="66"/>
+    <text class="node__tag"  x="236" y="378">P3</text>
+    <text class="node__meta" x="424" y="378" text-anchor="end">todo-driven</text>
+    <text class="node__name" x="236" y="404">ACT</text>
+    <text class="node__meta" x="424" y="406" text-anchor="end">work the todos</text>
+  </g>
+
+  <g class="node" id="n-review" data-phase="review" tabindex="0" role="button" aria-label="phase 4 review">
+    <rect class="node__bg" x="220" y="481" width="220" height="66"/>
+    <text class="node__tag"  x="236" y="506">P4 · GATE 1</text>
+    <text class="node__count" id="revCount" x="424" y="506" text-anchor="end">0 / 10</text>
+    <text class="node__name" x="236" y="532">REVIEW</text>
+    <text class="node__meta" x="424" y="534" text-anchor="end">subagent</text>
+  </g>
+
+  <g class="node" id="n-verify" data-phase="verify" tabindex="0" role="button" aria-label="phase 5 verify">
+    <rect class="node__bg" x="220" y="609" width="220" height="66"/>
+    <text class="node__tag"  x="236" y="634">P5 · GATE 2</text>
+    <text class="node__name" x="236" y="660">VERIFY</text>
+    <text class="node__meta" x="424" y="662" text-anchor="end">main agent</text>
+  </g>
+
+  <g class="node exit exit--bad" id="n-max" data-phase="max" tabindex="0" role="button" aria-label="exit max iteration reached">
+    <rect class="node__bg" x="540" y="558" width="180" height="40" rx="20"/>
+    <text class="node__pill" x="630" y="583" text-anchor="middle">exit · max iter</text>
+  </g>
+
+  <g class="node exit" id="n-done" data-phase="done" tabindex="0" role="button" aria-label="exit done">
+    <rect class="node__bg" x="240" y="753" width="180" height="38" rx="19"/>
+    <text class="node__pill" x="330" y="777" text-anchor="middle">exit · done</text>
+  </g>
+
+  <g class="node exit exit--bad" id="n-aborted" data-phase="aborted" tabindex="0" role="button" aria-label="exit aborted by user">
+    <rect class="node__bg" x="540" y="753" width="180" height="38" rx="19"/>
+    <text class="node__pill" x="630" y="777" text-anchor="middle">exit · aborted</text>
+  </g>
+
+  <!-- travelling packet renders over everything -->
+  <g id="fxOver">
+    <path id="comet" class="comet"/>
+    <circle id="head" class="head" r="3.6" cx="0" cy="0"/>
+  </g>
+</svg>
+      </div>
+      <div class="legend">
+        <span><i class="lg-live"></i>live transition</span>
+        <span><i class="lg-seen"></i>path taken</span>
+        <span><i></i>available</span>
+        <span><i class="lg-exit"></i>exit</span>
+        <span><i class="lg-manual"></i>manual abort</span>
+        <span style="color:#4d6675">click any node for detail</span>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:20px">
+      <div class="panel__hd"><b>node inspector</b><span id="inspTag">—</span></div>
+      <div class="panel__bd">
+        <div class="insp__top">
+          <h2 class="insp__name" id="inspName">IDLE</h2>
+          <span class="chip" id="inspChip">phase: idle</span>
+        </div>
+        <p class="insp__sub" id="inspSub"></p>
+        <ul class="insp__list" id="inspList"></ul>
+      </div>
+    </section>
+  </div>
+
+  <!-- ══ RIGHT ═════════════════════════════════════════ -->
+  <div class="col-r">
+
+    <section class="panel">
+      <div class="panel__hd"><b>run console</b><span id="runTag">stopped</span></div>
+      <div class="panel__bd">
+        <div class="cfg">
+          <span class="cfg__lbl">maxIteration</span>
+          <div class="stepper">
+            <button id="mDec" aria-label="decrease">−</button>
+            <span id="mVal">10</span>
+            <button id="mInc" aria-label="increase">+</button>
+          </div>
+        </div>
+        <div class="evts" id="evts"></div>
+        <div class="hint" id="hint">keys 1–9 fire · R resets</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel__hd"><b>scenarios</b><span>auto-play</span></div>
+      <div class="panel__bd">
+        <div class="scen" id="scen"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel__hd"><b>state.json</b><span>agent dir</span></div>
+      <div class="panel__bd"><pre class="json" id="json"></pre></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel__hd"><b>trace</b><span id="traceTag">0 events</span></div>
+      <div class="panel__bd"><ul class="trace" id="trace"></ul></div>
+    </section>
+
+  </div>
+</div>
+
+<footer>
+  <span>Behaviour mirrors <b style="color:#93aebb">docs/DESIGN.md</b> — iteration accounting, hash integrity and the todo:settled contract included.</span>
+  <span>frozenHash values here are illustrative.</span>
+</footer>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ═══ phase reference ══════════════════════════════════ */
+const INFO = {
+  idle: { tag:'no run', chip:'phase: idle', sub:'Nothing frozen, nothing persisted. The state file may still exist from a previous run, with phase reset to idle and an exitReason recorded.',
+    bullets:['Entered by <code>/gated-goal [maxIteration] [reviewerModel]</code>.',
+             'Args are order-tolerant: the first all-numeric token becomes <code>maxIteration</code> (clamped ≥ 1, default 10); the rest joins into the reviewer model string.',
+             'Exiting never deletes the state file — the last run stays inspectable.'] },
+  p1: { tag:'P1', chip:'phase: (pre-state)', sub:'Resolve the reviewer model, then prove it answers before anything is written to disk.',
+    bullets:['Model resolution: explicit arg → <code>ctx.ui.select</code> picker (120s) → main agent’s current model.',
+             '<code>pingReviewer</code> sends “reply with exactly: ok” with a 45s budget and a minimal read-only prompt.',
+             'Child status ≠ <code>done</code>, or output lacking “ok”, throws → error notify, abort, <b>no state saved</b>.',
+             'Cold local models needing more than 45s to first token will falsely fail here.'] },
+  plan: { tag:'P2', chip:'phase: plan', sub:'Agent and user align on the goal, then the plan is frozen — hashed, persisted, and mirrored into the todo list.',
+    bullets:['<code>freeze_plan(outcome, verification, constraints, quality, todos)</code> is the only exit.',
+             'Builds the canonical four-section prompt, sha256-hashes it, stores both in state.',
+             'Archives <code>{prompt, hash}</code> as a <code>gated-goal-frozen</code> session entry — a second store the integrity check can recover from.',
+             'Emits <code>todo:replace</code>, which <b>replaces</b> the list wholesale; appending instead would double the work list.',
+             'An empty array or any blank todo is rejected before state changes.'] },
+  act: { tag:'P3', chip:'phase: act', sub:'The agent works the todos. Todo — not gated-goal — owns the decision about when acting is over.',
+    bullets:['Todo is the sole owner of <code>agent_settled</code>, nudge de-duplication and active-wait semantics.',
+             '<code>continue</code>: one fresh incomplete-list follow-up was sent → stay in ACT.',
+             '<code>wait</code>: a subagent, reminder or other external wait is active → stay in ACT.',
+             '<code>review</code>: no continuation scheduled → enter REVIEW. Covers an empty list, an all-done list, and an unchanged list that already got its one nudge.',
+             'Gated-goal never reads todo snapshots — that would create handler-order races.'] },
+  review: { tag:'P4 · gate 1', chip:'phase: review', sub:'An independent reviewer subagent checks the work against the frozen plan. It can rubber-stamp, which is why it is not the last word.',
+    bullets:['Permissions fixed at read/grep/find/ls/bash — no write or edit. bash is not sandboxed, so this is an instruction, not a boundary.',
+             'Runs with <code>--no-context-files</code>, so the reviewed project’s own AGENTS.md / CLAUDE.md cannot rewrite the review standard.',
+             'Inherits <code>PI_SUBAGENT_CHILD=1</code> → cannot dispatch sub-subagents. Hard timeout 1200s.',
+             '<code>isApproved()</code> drops fenced code blocks, then requires the tag to <b>start a line</b>; only a child that exited <code>done</code> can approve.',
+             '<code>reviewsCompleted++</code> on <b>either</b> verdict — a review that ran is a spent iteration.',
+             'Hash mismatch is noted and, if possible, recovered from the archive — it never exits the gate.'] },
+  verify: { tag:'P5 · gate 2', chip:'phase: verify', sub:'The main agent re-runs the frozen verification itself and judges the real output. This exists because a reviewer emitted DONE without ever running the command.',
+    bullets:['<code>confirm_done(note?)</code> → exit “done”.',
+             '<code>reject_done(reason)</code> → back to ACT with the reason as feedback.',
+             '<code>reject_done</code> does <b>not</b> touch <code>reviewsCompleted</code> — P4 already charged it — but it does enforce the cap.',
+             'Acceptance is deliberately subjective; there is no parsed pass/fail of command output.'] },
+  done: { tag:'exit', chip:'exitReason: done', sub:'Both gates cleared. Status is cleared, a notify fires, and an “exited — done” follow-up is sent.',
+    bullets:['The only success exit. Reached exclusively through <code>confirm_done</code> in VERIFY.',
+             'State file keeps <code>phase: "idle"</code> plus the exit reason.'] },
+  max: { tag:'exit', chip:'exitReason: max iteration', sub:'Budget exhausted. Two ways in: a reviewer asking for changes with nothing left, or VERIFY rejecting the last charged approval.',
+    bullets:['The cap is checked after the increment on the <b>rejection</b> path only.',
+             'An approving review always reaches VERIFY, however many iterations remain — otherwise <code>maxIteration = 1</code> would make success unreachable.',
+             '<code>maxIteration = N</code> permits up to N reviews, each of which can reach VERIFY.'] },
+  aborted: { tag:'exit', chip:'exitReason: aborted by user', sub:'<code>/gated-goal-exit</code> from any active phase.',
+    bullets:['Exits with reason “aborted by user”.','Phase resets to idle; the state file is kept for inspection.'] },
+  abortping: { tag:'abort', chip:'phase: idle', sub:'The connectivity probe failed before any state existed. Nothing is written — this is not an exitReason, just a refusal to start.',
+    bullets:['Any throw from <code>pingReviewer</code> bubbles to the command handler.','Shows an error notify and returns to idle with no state file change.'] }
+};
+
+/* ═══ runtime state ════════════════════════════════════ */
+const EMPTY = () => ({
+  phase:'idle', maxIteration:10, reviewsCompleted:0, reviewerModel:null,
+  reviewerPermissions:null, frozenPrompt:null, frozenHash:null,
+  startedAt:null, originalCwd:null, exitReason:null
+});
+let S = EMPTY();
+let maxPref = 10, selected = 'idle', playing = null, seq = 0;
+
+const PERMS = ['read','grep','find','ls','bash'];
+const MODEL = 'anthropic/claude-sonnet-4-5';
+const CWD   = '/work/pi-portable';
+const hex = n => Array.from({length:n},()=>'0123456789abcdef'[(Math.random()*16)|0]).join('');
+
+/* ═══ events ═══════════════════════════════════════════ */
+const E = {
+  start: { label:'/gated-goal', note:'start run', tone:'go', from:['idle'],
+    run(){ const m = maxPref; S = EMPTY(); S.maxIteration = m; S.phase='p1';
+      S.reviewerModel = MODEL; S.startedAt = Date.now();
+      return { edge:'e-start', node:'p1', tone:'go', msg:`run started · <b>maxIteration=${m}</b> · reviewer ${MODEL}` }; } },
+
+  ping_ok: { label:'ping → "ok"', note:'reviewer answered in time', tone:'go', from:['p1'],
+    run(){ S.phase='plan'; S.reviewerPermissions = PERMS; S.originalCwd = CWD;
+      return { edge:'e-ping-ok', node:'plan', tone:'go', msg:'ping ok → <b>P2 PLAN</b> · state file created' }; } },
+
+  ping_fail: { label:'ping timeout', note:'45s elapsed / no "ok"', tone:'bad', from:['p1'],
+    run(){ S = EMPTY(); S.maxIteration = maxPref;
+      return { edge:'e-ping-fail', node:'abortping', tone:'bad', msg:'ping failed → abort · <b>no state saved</b>' }; } },
+
+  freeze_plan: { label:'freeze_plan()', note:'4 sections + todos', tone:'go', from:['plan'],
+    run(){ S.phase='act'; S.frozenPrompt='## Outcome …\\n## Verification …\\n## Constraints …\\n## Code Quality Requirements …';
+      S.frozenHash = hex(64);
+      return { edge:'e-freeze', node:'act', tone:'go', msg:'plan frozen · hashed · archived · <b>todo:replace</b> (5 items)' }; } },
+
+  settle_continue: { label:'todo:settled = continue', note:'one fresh nudge sent', from:['act'],
+    run(){ return { edge:'e-hold', node:'act', tone:'sys', msg:'incomplete list · nudged once → stay in <b>ACT</b>' }; } },
+
+  settle_wait: { label:'todo:settled = wait', note:'external wait active', from:['act'],
+    run(){ return { edge:'e-hold', node:'act', tone:'sys', msg:'wait:active (subagent/reminder) → stay in <b>ACT</b>' }; } },
+
+  settle_review: { label:'todo:settled = review', note:'no continuation scheduled', from:['act'],
+    run(){ S.phase='review';
+      return { edge:'e-settle', node:'review', tone:'amber', msg:'no continuation → <b>P4 REVIEW</b> · spawning reviewer' }; } },
+
+  review_done: { label:'verdict: DONE', note:'<promise> opens a line', tone:'go', from:['review'],
+    run(){ S.reviewsCompleted++; S.phase='verify';
+      return { edge:'e-verdict', node:'verify', tone:'go',
+        msg:`approved · reviewsCompleted → <b>${S.reviewsCompleted}</b> · <b>P5 VERIFY</b> (always, budget or not)` }; } },
+
+  review_changes: { label:'verdict: changes', note:'no tag emitted', tone:'bad', from:['review'],
+    run(){ S.reviewsCompleted++;
+      if (S.reviewsCompleted >= S.maxIteration){
+        exit('max iteration reached');
+        return { edge:'e-max-review', node:'max', tone:'bad',
+          msg:`changes requested · reviewsCompleted → <b>${S.reviewsCompleted}/${S.maxIteration}</b> · <b>exit: max iteration reached</b>` }; }
+      S.phase='act';
+      return { edge:'e-changes', node:'act', tone:'amber',
+        msg:`changes requested · reviewsCompleted → <b>${S.reviewsCompleted}/${S.maxIteration}</b> · back to <b>ACT</b>` }; } },
+
+  review_crash: { label:'reviewer timeout', note:'1200s · SIGTERM', tone:'bad', from:['review'],
+    run(){ S.phase='act';
+      return { edge:'e-changes', node:'act', tone:'bad',
+        msg:'review crashed — not a verdict, <b>no charge</b> · back to <b>ACT</b>' }; } },
+
+  confirm_done: { label:'confirm_done()', note:'verification output judged good', tone:'go', from:['verify'],
+    run(){ exit('done');
+      return { edge:'e-confirm', node:'done', tone:'go', msg:'main agent confirmed · <b>exit: done</b>' }; } },
+
+  reject_done: { label:'reject_done(reason)', note:'rubber-stamp caught', tone:'bad', from:['verify'],
+    run(){ if (S.reviewsCompleted >= S.maxIteration){
+        exit('max iteration reached');
+        return { edge:'e-max-verify', node:'max', tone:'bad',
+          msg:`rejected · budget already spent (<b>${S.reviewsCompleted}/${S.maxIteration}</b>) · <b>exit: max iteration reached</b>` }; }
+      S.phase='act';
+      return { edge:'e-reject', node:'act', tone:'amber',
+        msg:`rejected as rubber-stamp · <b>no extra charge</b> (${S.reviewsCompleted}/${S.maxIteration}) · back to <b>ACT</b>` }; } },
+
+  abort: { label:'/gated-goal-exit', note:'manual abort', tone:'bad', from:['plan','act','review','verify'],
+    run(){ exit('aborted by user');
+      return { edge:'e-manual', node:'aborted', tone:'bad', msg:'manual abort · <b>exit: aborted by user</b>' }; } }
+};
+const exit = reason => { S.phase='idle'; S.exitReason = reason; };
+const running = () => S.phase !== 'idle';
+
+/* ═══ dom ══════════════════════════════════════════════ */
+const $ = id => document.getElementById(id);
+const NS = 'http://www.w3.org/2000/svg';
+const svg = $('graph');
+const NODES = [...svg.querySelectorAll('.node')];
+const EDGES = [...svg.querySelectorAll('.edge')];
+const fxUnder = $('fxUnder'), comet = $('comet'), head = $('head');
+const RM = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// aura ring + industrial corner brackets, generated from each node rect
+NODES.forEach(g => {
+  const r = g.querySelector('.node__bg');
+  const x = +r.getAttribute('x'), y = +r.getAttribute('y');
+  const w = +r.getAttribute('width'), h = +r.getAttribute('height');
+  const rx = +(r.getAttribute('rx') || 0);
+
+  const aura = document.createElementNS(NS,'rect');
+  aura.setAttribute('class','node__aura');
+  aura.setAttribute('x',x-5); aura.setAttribute('y',y-5);
+  aura.setAttribute('width',w+10); aura.setAttribute('height',h+10);
+  if (rx) aura.setAttribute('rx',rx+5);
+  r.before(aura);
+
+  if (rx) return;                                        // pills stay clean
+  const L = 9;
+  const p = document.createElementNS(NS,'path');
+  p.setAttribute('class','tick');
+  p.setAttribute('d',
+    `M${x},${y+L} V${y} H${x+L} M${x+w-L},${y} H${x+w} V${y+L}` +
+    `M${x+w},${y+h-L} V${y+h} H${x+w-L} M${x+L},${y+h} H${x} V${y+h-L}`);
+  r.after(p);
+});
+
+/* ═══ render ═══════════════════════════════════════════ */
+let lastRC = 0;
+function paint(live){
+  const phaseNode = S.phase === 'idle'
+    ? (S.exitReason === 'done' ? 'done' : S.exitReason === 'max iteration reached' ? 'max'
+      : S.exitReason === 'aborted by user' ? 'aborted' : 'idle')
+    : S.phase;
+  const target = live || phaseNode;
+  NODES.forEach(n => {
+    n.classList.toggle('is-live', n.dataset.phase === target);
+    n.classList.toggle('is-sel',  n.dataset.phase === selected);
+  });
+  const rc = $('revCount');
+  rc.textContent = `${S.reviewsCompleted} / ${S.maxIteration}`;
+  if (S.reviewsCompleted !== lastRC){
+    lastRC = S.reviewsCompleted;
+    if (!RM && lastRC){ rc.classList.remove('is-tick'); rc.getBoundingClientRect(); rc.classList.add('is-tick'); }
+  }
+  $('phaseRead').textContent =
+    `phase — ${S.phase}${S.exitReason ? ` · ${S.exitReason}` : ''}`;
+  $('runTag').textContent = running() ? `active · ${S.reviewsCompleted}/${S.maxIteration}` : (S.exitReason || 'stopped');
+}
+
+let prevJson = null;               // null = first paint, nothing flashes
+const ORDER = ['phase','maxIteration','reviewsCompleted','reviewerModel','reviewerPermissions',
+               'frozenPrompt','frozenHash','startedAt','originalCwd','exitReason'];
+function renderJson(){
+  const view = {};
+  ORDER.forEach(k => {
+    let v = S[k];
+    if (k === 'frozenPrompt' && v) v = '## Outcome … ×4 sections';
+    if (k === 'frozenHash' && v)   v = v.slice(0,20) + '…';
+    view[k] = v;
+  });
+  const rows = ORDER.map((k,i) => {
+    const v = view[k], last = i === ORDER.length - 1;
+    let val;
+    if (v === null || v === undefined) val = '<span class="nl">null</span>';
+    else if (typeof v === 'number')    val = `<span class="n">${v}</span>`;
+    else if (Array.isArray(v))         val = `<span class="p">[</span><span class="s">"${v.join('", "')}"</span><span class="p">]</span>`;
+    else                               val = `<span class="s">"${String(v)}"</span>`;
+    const hot = prevJson && JSON.stringify(prevJson[k]) !== JSON.stringify(v) ? ' hot' : '';
+    return `<span class="row${hot}">  <span class="k">"${k}"</span><span class="p">:</span> ${val}${last?'':'<span class="p">,</span>'}</span>`;
+  }).join('');
+  $('json').innerHTML = `<span class="row"><span class="p">{</span></span>${rows}<span class="row"><span class="p">}</span></span>`;
+  prevJson = JSON.parse(JSON.stringify(view));
+}
+
+function renderEvents(){
+  const box = $('evts');
+  const avail = Object.entries(E).filter(([,e]) => e.from.includes(S.phase));
+  box.innerHTML = avail.map(([id,e],i) => `
+    <button class="evt${e.tone==='go'?' evt--go':e.tone==='bad'?' evt--bad':''}" data-ev="${id}" ${playing?'disabled':''}>
+      <kbd>${i+1}</kbd>
+      <span><strong>${e.label}</strong><em>${e.note}</em></span>
+    </button>`).join('');
+  if (!avail.length) box.innerHTML = `<div class="hint">terminal — press R or start a new run</div>`;
+  $('hint').textContent = playing ? 'scenario playing…' : (running() ? 'keys 1–9 fire · R resets' : 'set maxIteration, then start');
+  $('mDec').disabled = $('mInc').disabled = running() || !!playing;
+}
+
+function log(tone, msg){
+  const ul = $('trace');
+  const li = document.createElement('li');
+  li.className = `t-${tone||'sys'}`;
+  li.innerHTML = `<i>${String(++seq).padStart(3,'0')}</i><span>${msg}</span>`;
+  if (!RM){ li.classList.add('fresh'); setTimeout(() => li.classList.remove('fresh'), 1300); }
+  ul.appendChild(li);
+  ul.scrollTo({ top: ul.scrollHeight, behavior: RM ? 'auto' : 'smooth' });
+  $('traceTag').textContent = `${seq} event${seq===1?'':'s'}`;
+}
+
+const TITLE = { abortping:'abort → idle', max:'exit · max iteration', done:'exit · done',
+                aborted:'exit · aborted', p1:'P1 select reviewer', plan:'P2 plan',
+                act:'P3 act', review:'P4 review', verify:'P5 verify' };
+function inspect(phase){
+  selected = phase;
+  const d = INFO[phase]; if (!d) return;
+  $('inspTag').textContent = d.tag;
+  $('inspName').textContent = (TITLE[phase] || phase).toUpperCase();
+  $('inspChip').textContent = d.chip;
+  $('inspChip').className = 'chip ' + (phase==='done' ? 'chip--k' : ['max','aborted','abortping'].includes(phase) ? '' : 'chip--a');
+  $('inspSub').innerHTML = d.sub;
+  $('inspList').innerHTML = d.bullets.map(b => `<li>${b}</li>`).join('');
+  paint();
+}
+
+/* ═══ fire ═════════════════════════════════════════════ */
+let liveTimer = null, rafId = null, pending = null;
+
+const toneOf = node => node === 'done' ? 'green'
+  : ['max','aborted','abortping'].includes(node) ? 'red' : 'amber';
+
+/* expanding ring emitted from the node the signal just landed on */
+function halo(phase){
+  if (RM) return;
+  const g = NODES.find(n => n.dataset.phase === phase); if (!g) return;
+  const src = g.querySelector('.node__bg'), tone = toneOf(phase);
+  const rings = tone === 'amber' ? [0] : [0,150];        // exits get a double ring
+  rings.forEach(delay => {
+    const el = document.createElementNS(NS,'rect');
+    el.setAttribute('class','halo' + (tone === 'amber' ? '' : ` halo--${tone}`));
+    ['x','y','width','height','rx'].forEach(a => {
+      const v = src.getAttribute(a); if (v !== null) el.setAttribute(a,v);
+    });
+    el.style.animationDelay = delay + 'ms';
+    el.addEventListener('animationend', () => el.remove());
+    fxUnder.appendChild(el);
+  });
+}
+
+/* everything that lands the moment the packet reaches the target node */
+function commit(r){
+  log(r.tone, r.msg);
+  renderJson(); renderEvents(); paint(r.node); inspect(r.node);
+  halo(r.node);
+
+  const hit = NODES.find(n => n.dataset.phase === r.node);
+  if (hit && !RM){
+    hit.classList.remove('is-arrive'); hit.getBoundingClientRect();
+    hit.classList.add('is-arrive');
+    setTimeout(() => hit.classList.remove('is-arrive'), 560);
+  }
+  clearTimeout(liveTimer);
+  liveTimer = setTimeout(() => { EDGES.forEach(x => x.classList.remove('is-live')); paint(); }, 2800);
+}
+
+/* a packet rides the edge; arrival is what commits the transition */
+function travel(r){
+  // the previous commit's dim-down timer must not fire mid-flight: paint() with
+  // no argument derives the live node from S.phase, which is already the
+  // destination, and would light it up before the packet gets there
+  clearTimeout(liveTimer);
+  const edge = $(r.edge);
+  EDGES.forEach(x => x.classList.remove('is-live'));
+  if (edge) edge.classList.add('is-live','is-seen');
+  const hit = NODES.find(n => n.dataset.phase === r.node);
+  if (hit) hit.classList.add('is-seen');
+
+  if (RM || !edge){ commit(r); return; }
+
+  const L   = edge.getTotalLength();
+  const seg = Math.max(20, Math.min(64, L * .42));
+  const dur = Math.max(340, Math.min(820, 250 + L * .6));
+  const arriveAt = L / (L + seg);
+  const ease = t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;
+
+  comet.setAttribute('d', edge.getAttribute('d'));
+  comet.style.strokeDasharray = `${seg} ${L + seg}`;
+  comet.style.opacity = '1';
+  head.style.opacity  = '1';
+  pending = r;
+
+  const t0 = performance.now();
+  let landed = false;
+  const step = now => {
+    const t = Math.min(1, (now - t0) / dur), e = ease(t);
+    comet.style.strokeDashoffset = `${seg - (L + seg) * e}`;
+    const pt = edge.getPointAtLength(Math.min(L, Math.max(0, (L + seg) * e)));
+    head.setAttribute('cx', pt.x); head.setAttribute('cy', pt.y);
+    if (!landed && e >= arriveAt){ landed = true; pending = null; commit(r); }
+    if (t < 1){ rafId = requestAnimationFrame(step); }
+    else {
+      rafId = null; comet.style.opacity = '0'; head.style.opacity = '0';
+      if (!landed){ pending = null; commit(r); }
+    }
+  };
+  rafId = requestAnimationFrame(step);
+}
+
+/* a new event mid-flight lands the previous packet immediately */
+function flushTravel(){
+  if (rafId){ cancelAnimationFrame(rafId); rafId = null; }
+  comet.style.opacity = '0'; head.style.opacity = '0';
+  if (pending){ const p = pending; pending = null; commit(p); }
+}
+
+function fire(id){
+  const e = E[id];
+  if (!e || !e.from.includes(S.phase)) return;
+  killIntro();                   // an early click must not fight the plot-in
+  flushTravel();
+  const r = e.run();
+  renderEvents();                // input surface follows state, not the packet
+  travel(r);
+}
+
+/* the boot plot-in, cancellable the moment the user acts */
+let introAnims = [];
+function killIntro(){
+  if (!introAnims.length) return;
+  introAnims.forEach(a => { try { a.finish(); } catch { a.cancel(); } });
+  introAnims = [];
+  EDGES.forEach(el => { el.style.strokeDasharray = ''; el.style.strokeDashoffset = ''; });
+}
+
+function reset(){
+  if (playing){ clearTimeout(playing.t); playing = null; }
+  if (rafId){ cancelAnimationFrame(rafId); rafId = null; }
+  pending = null; comet.style.opacity = '0'; head.style.opacity = '0';
+  clearTimeout(liveTimer);
+  fxUnder.textContent = '';
+  S = EMPTY(); S.maxIteration = maxPref; seq = 0; lastRC = 0;
+  EDGES.forEach(x => x.classList.remove('is-live','is-seen'));
+  NODES.forEach(n => n.classList.remove('is-seen','is-live'));
+  $('trace').innerHTML = ''; $('traceTag').textContent = '0 events';
+  prevJson = null;
+  renderJson(); renderEvents(); inspect('idle'); paint();
+  log('sys','reset · <b>idle</b>');
+}
+
+/* ═══ scenarios ════════════════════════════════════════ */
+const SCEN = {
+  'happy path': { max:10, steps:['start','ping_ok','freeze_plan','settle_continue','settle_review','review_done','confirm_done'] },
+  'rubber-stamp caught': { max:3, steps:['start','ping_ok','freeze_plan','settle_review','review_done','reject_done','settle_review','review_done','confirm_done'] },
+  'budget exhausted': { max:2, steps:['start','ping_ok','freeze_plan','settle_review','review_changes','settle_wait','settle_review','review_changes'] },
+  'cold reviewer': { max:10, steps:['start','ping_fail'] }
+};
+function play(name){
+  reset();
+  const s = SCEN[name];
+  maxPref = s.max; $('mVal').textContent = s.max; S.maxIteration = s.max;
+  renderJson(); paint();
+  const slow = RM ? 120 : 1250;
+  playing = { name, i:0, t:null };
+  document.querySelectorAll('#scen button').forEach(b => {
+    b.classList.toggle('playing', b.dataset.scen === name);
+    b.style.setProperty('--p', 0);
+  });
+  const btn = document.querySelector(`#scen button[data-scen="${name}"]`);
+  const tick = () => {
+    if (!playing) return;
+    if (playing.i >= s.steps.length){
+      playing = null;
+      setTimeout(() => document.querySelectorAll('#scen button')
+        .forEach(b => { b.classList.remove('playing'); b.style.setProperty('--p',0); }), 420);
+      renderEvents(); return;
+    }
+    fire(s.steps[playing.i++]);
+    if (btn) btn.style.setProperty('--p', playing.i / s.steps.length);
+    renderEvents();
+    playing.t = setTimeout(tick, slow);
+  };
+  playing.t = setTimeout(tick, 260);
+  renderEvents();
+}
+
+/* ═══ wiring ═══════════════════════════════════════════ */
+$('scen').innerHTML = Object.entries(SCEN)
+  .map(([k,v]) => `<button data-scen="${k}">▸ ${k}<br><span style="opacity:.6">max ${v.max} · ${v.steps.length} steps</span></button>`).join('');
+$('scen').addEventListener('click', ev => {
+  const b = ev.target.closest('button'); if (!b) return;
+  playing && playing.name === b.dataset.scen ? reset() : play(b.dataset.scen);
+});
+$('evts').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-ev]'); if (!b || b.disabled) return;
+  fire(b.dataset.ev);
+});
+$('mDec').addEventListener('click', () => { maxPref = Math.max(1, maxPref-1); $('mVal').textContent = maxPref; S.maxIteration = maxPref; renderJson(); paint(); });
+$('mInc').addEventListener('click', () => { maxPref = Math.min(20, maxPref+1); $('mVal').textContent = maxPref; S.maxIteration = maxPref; renderJson(); paint(); });
+
+NODES.forEach(n => {
+  n.addEventListener('click', () => inspect(n.dataset.phase));
+  n.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' '){ ev.preventDefault(); inspect(n.dataset.phase); } });
+});
+
+document.addEventListener('keydown', ev => {
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  if (/^[1-9]$/.test(ev.key)){
+    if (playing) return;
+    const b = document.querySelectorAll('#evts button[data-ev]')[+ev.key - 1];
+    if (b) { ev.preventDefault(); fire(b.dataset.ev); }
+  } else if (ev.key === 'r' || ev.key === 'R'){ ev.preventDefault(); reset(); }
+});
+
+/* ═══ boot: plot the blueprint, top-down ═══════════════ */
+function intro(){
+  if (RM) return;
+  const EASE = 'cubic-bezier(.2,.9,.3,1)';
+
+  document.querySelectorAll('.masthead > div, .panel').forEach((el,i) => {
+    introAnims.push(el.animate([{opacity:0,transform:'translateY(10px)'},{opacity:1,transform:'none'}],
+      { duration:520, delay:i*70, easing:EASE, fill:'backwards' }));
+  });
+
+  // node / edge order follows the signal path down the spine
+  const order = ['n-idle','e-start','n-p1','e-ping-fail','n-abortping','e-ping-ok',
+                 'n-plan','e-freeze','n-act','e-hold','e-settle','n-review',
+                 'e-changes','e-verdict','e-max-review','n-max','n-verify',
+                 'e-reject','e-max-verify','e-confirm','n-done','e-manual','n-aborted'];
+  const t0 = 260, gap = 52;
+
+  order.forEach((id,i) => {
+    const el = $(id); if (!el) return;
+    const delay = t0 + i*gap;
+    if (id.startsWith('n-')){
+      introAnims.push(el.animate([{opacity:0,transform:'translateY(-7px)'},{opacity:1,transform:'none'}],
+        { duration:440, delay, easing:EASE, fill:'backwards' }));
+    } else {
+      const L = el.getTotalLength();
+      el.style.strokeDasharray = String(L);
+      el.style.strokeDashoffset = String(L);
+      const a = el.animate([{strokeDashoffset:L},{strokeDashoffset:0}],
+        { duration:480, delay, easing:'ease-out', fill:'backwards' });
+      introAnims.push(a);
+      a.finished.then(() => { el.style.strokeDasharray = ''; el.style.strokeDashoffset = ''; })
+       .catch(() => {});
+    }
+  });
+
+  const tail = t0 + order.length*gap;
+  svg.querySelectorAll('.elabel, .frame-line, .frame-txt').forEach(el => {
+    introAnims.push(el.animate([{opacity:0},{opacity:1}],
+      { duration:600, delay:tail*.55, easing:'ease-out', fill:'backwards' }));
+  });
+  svg.querySelectorAll('.tick').forEach(el => {
+    introAnims.push(el.animate([{opacity:0},{opacity:getComputedStyle(el).opacity}],
+      { duration:500, delay:tail*.7, easing:'ease-out', fill:'backwards' }));
+  });
+}
+
+/* boot */
+renderJson(); renderEvents(); inspect('idle'); paint();
+log('sys','ready · pick a scenario or press <b>1</b> to start');
+intro();
+})();
+</script>
+</body>
+</html>
