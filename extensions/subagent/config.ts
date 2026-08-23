@@ -62,6 +62,7 @@ export interface SubagentConfig {
 		hungThresholdSec: number;
 		defaultResourceGroup: string;
 		retainCompletedSec: number;
+		maxCapturedMessages: number;
 	};
 	resourceGroups: Record<string, ResourceGroup>;
 	providerGroups: Record<string, string>;
@@ -74,6 +75,7 @@ const DEFAULT_CONFIG: SubagentConfig = {
 		hungThresholdSec: 120,
 		defaultResourceGroup: "default",
 		retainCompletedSec: 1800,
+		maxCapturedMessages: 1000,
 	},
 	resourceGroups: { default: { concurrency: 4 } },
 	providerGroups: {},
@@ -93,8 +95,15 @@ function normalize(raw: any): SubagentConfig {
 			: [];
 		roles[name] = { ...value, suggestedModels: suggestions };
 	}
+	const rawDefaults = { ...DEFAULT_CONFIG.defaults, ...(raw?.defaults ?? {}) };
+	const maxCapturedMessages = Number(rawDefaults.maxCapturedMessages);
 	return {
-		defaults: { ...DEFAULT_CONFIG.defaults, ...(raw?.defaults ?? {}) },
+		defaults: {
+			...rawDefaults,
+			maxCapturedMessages: Number.isFinite(maxCapturedMessages) && maxCapturedMessages > 0
+				? Math.floor(maxCapturedMessages)
+				: DEFAULT_CONFIG.defaults.maxCapturedMessages,
+		},
 		resourceGroups: { ...DEFAULT_CONFIG.resourceGroups, ...(raw?.resourceGroups ?? {}) },
 		providerGroups: { ...(raw?.providerGroups ?? {}) },
 		roles,

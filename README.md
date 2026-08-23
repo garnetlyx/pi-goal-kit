@@ -38,6 +38,11 @@ pi install -l git:github.com/garnetlyx/pi-goal-kit
 Pi auto-discovers `extensions/*/index.ts` and enables them by default after
 install. Use `pi config` to disable any you don't want.
 
+> [!IMPORTANT]
+> Reliable reminder, subagent, and todo continuation through manual compaction
+> requires a Pi host that queues explicit extension follow-ups during
+> compaction. Otherwise, do not run `/compact` while waits are active.
+
 ## The extensions (simple → complex)
 
 | Extension | What it does | Tools / commands |

@@ -54,20 +54,21 @@ extension acquires semaphore and spawns:
 pi.sendUserMessage(result, { deliverAs: "followUp" })
 ```
 
+Completion uses Pi's session-level follow-up queue. During compaction, the
+host must queue explicit extension follow-ups and resume them afterward.
+
 `PI_SUBAGENT_CHILD=1` makes the extension a no-op in children, preventing
 nested dispatch.
 
+Each dispatch emits at most one `wait:done`. Queue waits are cancellable and
+time-bounded. Session shutdown cancels queued, running, and hung entries.
+Cancellation escalates from SIGTERM to SIGKILL after the grace period.
+
 ## One registry per process, not per module
 
-`scheduler.ts` keys its registry on `Symbol.for("pi-goal-kit.subagent.registry.v1")`
-under `globalThis`. Pi loads every extension entry point through its own Jiti
-loader with `moduleCache: false`, so a plain `export const registry = new
-Registry()` is instantiated once per *importing extension*: gated-goal's
-reviewer would register into an object that this extension's panel,
-`dispatch_status`, watchdog, and shutdown kill loop never look at. Reviewers
-were invisible and unkillable for exactly that reason. Anything else that has
-to be shared across entry points needs the same treatment (or the `pi.events`
-bus, which Pi does share).
+`scheduler.ts` stores the registry under
+`Symbol.for("pi-goal-kit.subagent.registry.v1")` on `globalThis`, so subagent
+and gated-goal share one process-wide registry.
 
 ## Files
 
@@ -100,7 +101,9 @@ via `dispatch`'s `systemPrompt` parameter.
 Required explicit parameters:
 
 - `task`: detailed self-contained brief;
-- `timeout`: hard timeout seconds;
+- `timeout`: per-phase timeout seconds — queue acquisition may consume up to
+  this amount, then a started child gets a fresh execution budget of the same
+  length (worst-case wall time `2 × timeout`);
 - `permissions`: `readonly`, `junior`, `full`, or explicit tool names;
 - `model`: currently available `provider/modelId`.
 
@@ -118,11 +121,9 @@ If an explicit model is absent from the current session catalogue, dispatch
 fails with usable role suggestions (or available alternatives), requiring the
 main agent to choose and retry. It does not auto-substitute.
 
-A role's `timeoutSec` is advisory only — the explicit dispatch `timeout` always
-wins and no warning is emitted on override, because local and quantized models
-routinely need far longer than a role's suggested value and nagging would push
-the main agent toward under-sizing it. `resourceGroup` is operational
-configuration and still routes the chosen provider to the correct semaphore.
+A role's `timeoutSec` is advisory; the explicit dispatch `timeout` wins. The
+same value independently bounds queue acquisition and child execution.
+`resourceGroup` routes the provider to its semaphore.
 
 ### `dispatch_status` / `dispatch_cancel`
 
@@ -136,7 +137,8 @@ Text status list / cancellation by id.
     "timeoutSec": 600,
     "hungThresholdSec": 120,
     "defaultResourceGroup": "default",
-    "retainCompletedSec": 1800
+    "retainCompletedSec": 1800,
+    "maxCapturedMessages": 1000
   },
   "resourceGroups": {
     "default": { "concurrency": 4 },
@@ -157,12 +159,10 @@ Text status list / cancellation by id.
 }
 ```
 
-`subagent.json` is seeded with starter roles only when absent, and
-never overwritten afterwards. `loadConfig` re-reads it per tool call, but tool
-schemas are fixed at session start, so restart Pi when an edit needs to reach
-them.
-
-Role prompts carry no model advice, so user model preferences have one source:
+`subagent.json` is seeded only when absent and is re-read per tool call.
+Concurrency changes apply to new dispatches; reducing a limit does not stop
+active children. `maxCapturedMessages` bounds panel/debug history while final
+assistant text is retained separately. Model preferences live in
 `suggestedModels`.
 
 ## `/subagents` panel
@@ -177,8 +177,8 @@ loop snaps scrollback.
 All child output is untrusted; the main agent independently checks important
 files, commands, and facts.
 
-- Registry and child handles are in memory; `/reload` clears history and can
-  orphan a currently running child.
+- Registry and child handles are in memory. `/reload` cancels live children;
+  completed history remains process-local and is not durable across restart.
 - Tool schemas (including `dispatch` parameters) are registered at session
   start and fixed for the session. `/reload` reloads extension code but does
   **not** refresh the main agent's view of tool schemas — changes to tool

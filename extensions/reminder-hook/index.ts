@@ -397,6 +397,7 @@ export default function (pi: ExtensionAPI) {
 			if (!params.condition && !params.at && params.in_minutes == null) {
 				return {
 					content: [{ type: "text", text: "Provide at least one of: condition, at, in_minutes." }],
+					details: {},
 					isError: true,
 				};
 			}
@@ -420,7 +421,7 @@ export default function (pi: ExtensionAPI) {
 			if (when) parts.push(`gate ${new Date(when).toLocaleString()}`);
 			if (r.condition) parts.push(`shell ${resolveShell().shell}`, `poll every ${r.pollSeconds}s: ${r.condition}`);
 			if (r.timeoutMs) parts.push(`timeout ${r.timeoutMs / 60000}min`);
-			return { content: [{ type: "text", text: `Reminder armed — ${parts.join(" | ")}. Stop now; you'll be woken automatically.` }] };
+			return { content: [{ type: "text", text: `Reminder armed — ${parts.join(" | ")}. Stop now; you'll be woken automatically.` }], details: {} };
 		},
 	});
 
@@ -434,7 +435,7 @@ export default function (pi: ExtensionAPI) {
 			const remaining = loadReminders(ctx.sessionManager.getSessionId()).filter((x) => x.id !== params.id);
 			saveReminders(ctx.cwd, ctx.sessionManager.getSessionId(), remaining);
 			pi.events.emit("wait:done", { source: "reminder-hook", id: params.id });
-			return { content: [{ type: "text", text: `Cancelled ${params.id}.` }] };
+			return { content: [{ type: "text", text: `Cancelled ${params.id}.` }], details: {} };
 		},
 	});
 

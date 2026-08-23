@@ -13,8 +13,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { Permissions } from "./config.ts";
-import { type DispatchEntry, registry } from "./scheduler.ts";
+import { loadConfig, type Permissions } from "./config.ts";
+import { captureMessage, type DispatchEntry, getFinalOutput, registry } from "./scheduler.ts";
 
 /** Read-only/network extensions whose tools are safe to expose alongside the
  *  builtin readonly/junior sets (they don't mutate the workspace). */
@@ -43,6 +43,30 @@ export function describePermissions(perm: Permissions): string {
 	return perm;
 }
 
+export function createProcessTerminator(
+	proc: Pick<import("node:child_process").ChildProcess, "kill">,
+	forceAfterMs = 5000,
+): { terminate: () => void; markClosed: () => void } {
+	let closed = false;
+	let terminating = false;
+	let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+	return {
+		terminate() {
+			if (closed || terminating) return;
+			terminating = true;
+			try { proc.kill("SIGTERM"); } catch { /* ignore */ }
+			forceKillTimer = setTimeout(() => {
+				if (closed) return;
+				try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+			}, forceAfterMs);
+		},
+		markClosed() {
+			closed = true;
+			if (forceKillTimer) clearTimeout(forceKillTimer);
+		},
+	};
+}
+
 async function writeTempPrompt(name: string, prompt: string): Promise<{ dir: string; file: string }> {
 	const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
 	const safe = name.replace(/[^\w.-]+/g, "_");
@@ -61,18 +85,6 @@ function piInvocation(args: string[]): { command: string; args: string[] } {
 	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
 	if (!isGenericRuntime) return { command: process.execPath, args };
 	return { command: "pi", args };
-}
-
-function getFinalOutput(messages: Message[]): string {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const m = messages[i];
-		if (m.role === "assistant") {
-			for (const part of m.content) {
-				if (part.type === "text") return part.text;
-			}
-		}
-	}
-	return "";
 }
 
 /**
@@ -94,9 +106,12 @@ export async function runChild(opts: {
 	 *  they are inspecting — a reviewer, for instance. Note that context files
 	 *  load regardless of project trust, so trust settings cannot substitute. */
 	contextFiles?: boolean;
+	/** Test seam for ChildProcess lifecycle regressions. Production uses node:child_process.spawn. */
+	spawnProcess?: typeof spawn;
 }): Promise<DispatchEntry> {
-	const { pi: _pi, ctx, entry, modelArg, permissions, systemPrompt, timeoutSec, signal, contextFiles } = opts;
+	const { pi: _pi, ctx, entry, modelArg, permissions, systemPrompt, timeoutSec, signal, contextFiles, spawnProcess = spawn } = opts;
 	const e = entry;
+	const maxCapturedMessages = loadConfig(ctx).defaults.maxCapturedMessages;
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session", "--model", modelArg];
 	if (contextFiles === false) args.push("--no-context-files");
@@ -122,26 +137,28 @@ export async function runChild(opts: {
 	try {
 		const exitCode = await new Promise<number>((resolve) => {
 			const inv = piInvocation(args);
-			const proc = spawn(inv.command, inv.args, {
+			const proc = spawnProcess(inv.command, inv.args, {
 				cwd: ctx.cwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 				env: childEnv,
 			});
+			const terminator = createProcessTerminator(proc);
 			e.kill = () => {
-				try { proc.kill("SIGTERM"); } catch { /* ignore */ }
-				setTimeout(() => {
-					try { if (!proc.killed) proc.kill("SIGKILL"); } catch { /* ignore */ }
-				}, 5000);
+				aborted = true;
+				terminator.terminate();
 			};
 
 			let buffer = "";
+			let didSpawn = proc.pid !== undefined;
+			let preSpawnError: Error | undefined;
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
 				let ev: any;
 				try { ev = JSON.parse(line); } catch { return; }
+				e.lastActivityAt = Date.now();
 				if (ev.type === "message_end" && ev.message) {
-					e.messages.push(ev.message as Message);
+					captureMessage(e, ev.message as Message, maxCapturedMessages);
 					if ((ev.message as Message).role === "assistant") {
 						const u = (ev.message as any).usage;
 						if (u?.cost?.total) (e as any).cost = ((e as any).cost ?? 0) + u.cost.total;
@@ -149,7 +166,7 @@ export async function runChild(opts: {
 					registry.touch(e.id);
 				}
 				if (ev.type === "tool_result_end" && ev.message) {
-					e.messages.push(ev.message as Message);
+					captureMessage(e, ev.message as Message, maxCapturedMessages);
 					registry.touch(e.id);
 				}
 				// Track provider auto-retries (connection errors / empty bodies, etc.).
@@ -162,32 +179,60 @@ export async function runChild(opts: {
 			};
 
 			proc.stdout.on("data", (data) => {
+				e.lastActivityAt = Date.now();
 				buffer += data.toString();
 				const lines = buffer.split("\n");
 				buffer = lines.pop() || "";
 				for (const line of lines) processLine(line);
 			});
 			proc.stderr.on("data", (data) => {
+				e.lastActivityAt = Date.now();
 				(e as any).stderr = ((e as any).stderr ?? "") + data.toString();
 			});
-			proc.on("close", (code) => {
-				if (buffer.trim()) processLine(buffer);
-				resolve(code ?? 0);
-			});
-			proc.on("error", () => resolve(1));
 
-			// hard timeout
+			let onAbort: (() => void) | undefined;
+			let settled = false;
 			const to = setTimeout(() => {
 				timedOut = true;
-				try { proc.kill("SIGTERM"); } catch { /* ignore */ }
-				setTimeout(() => { try { if (!proc.killed) proc.kill("SIGKILL"); } catch { /* ignore */ } }, 5000);
+				terminator.terminate();
 			}, timeoutSec * 1000);
-			proc.on("close", () => clearTimeout(to));
+			const settle = (code: number) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(to);
+				if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+				if (buffer.trim()) processLine(buffer);
+				resolve(code);
+			};
+			proc.once("spawn", () => { didSpawn = true; });
+			proc.on("close", (code, closeSignal) => {
+				terminator.markClosed();
+				settle(preSpawnError ? 1 : code ?? (closeSignal ? 1 : 0));
+			});
+			proc.on("error", (error) => {
+				if (!didSpawn) {
+					preSpawnError = error;
+					e.errorMessage ||= `failed to spawn subagent: ${error.message}`;
+					registry.changed();
+					// Spawn failures have no live child to orphan. Settle immediately;
+					// a later close event is harmless because settle() is idempotent.
+					terminator.markClosed();
+					settle(1);
+					return;
+				}
+				// ChildProcess also emits "error" when signalling fails (for example
+				// EPERM), and Node may not emit close afterward. Preserve an earlier,
+				// more specific error and settle as failure/cancellation so the caller
+				// cannot hold its semaphore slot forever. A later close is harmless.
+				e.errorMessage ||= `subagent process error: ${error.message}`;
+				registry.changed();
+				settle(1);
+			});
 
 			if (signal) {
-				const onAbort = () => {
+				onAbort = () => {
 					aborted = true;
-					try { proc.kill("SIGTERM"); } catch { /* ignore */ }
+					terminator.terminate();
 				};
 				if (signal.aborted) onAbort();
 				else signal.addEventListener("abort", onAbort, { once: true });
@@ -195,7 +240,7 @@ export async function runChild(opts: {
 		});
 
 		e.exitCode = exitCode;
-		e.finalOutput = getFinalOutput(e.messages);
+		e.finalOutput = getFinalOutput(e.messages) || e.finalOutput || "";
 
 		// Inspect the final assistant message's stopReason. pi's json mode exits 0
 		// even when the provider connection failed and auto-retries were
@@ -244,6 +289,7 @@ export async function runChild(opts: {
 		e.endedAt = Date.now();
 		// finalOutput/status/endedAt are mutated in place; wake an open panel now
 		// rather than waiting for an indirect polling signature to notice.
+		e.kill = undefined;
 		registry.changed();
 		if (tmpFile) try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
 		if (tmpDir) try { fs.rmdirSync(tmpDir); } catch { /* ignore */ }

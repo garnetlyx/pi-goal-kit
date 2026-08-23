@@ -339,10 +339,10 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (state.phase !== "plan") {
-				return { content: [{ type: "text", text: `freeze_plan only valid in PLAN phase (current: ${state.phase}).` }], isError: true };
+				return { content: [{ type: "text", text: `freeze_plan only valid in PLAN phase (current: ${state.phase}).` }], details: {}, isError: true };
 			}
 			if (params.todos.length === 0 || params.todos.some((todo) => !todo.text.trim())) {
-				return { content: [{ type: "text", text: "freeze_plan requires at least one non-blank todo before entering ACT." }], isError: true };
+				return { content: [{ type: "text", text: "freeze_plan requires at least one non-blank todo before entering ACT." }], details: {}, isError: true };
 			}
 			const frozenPrompt = buildFrozenPrompt(params);
 			state.frozenPrompt = frozenPrompt;
@@ -369,7 +369,7 @@ export default function (pi: ExtensionAPI) {
 				`📋 Plan frozen (sha256 ${state.frozenHash.slice(0, 12)}…). Your todo list has been replaced with the frozen one (${params.todos.length} item(s)) — do NOT add them again:\n${todoLines}\n\nStart ACTING. Mark items done as you finish them. When work is complete, stop with an all-done or cleared list; todo will nudge once for fresh incomplete work, and review starts when no continuation is scheduled.`,
 				{ deliverAs: "followUp" },
 			);
-			return { content: [{ type: "text", text: `Frozen. phase=act, hash=${state.frozenHash.slice(0, 12)}…` }] };
+			return { content: [{ type: "text", text: `Frozen. phase=act, hash=${state.frozenHash.slice(0, 12)}…` }], details: {} };
 		},
 	});
 
@@ -391,11 +391,11 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (state.phase !== "verify") {
-				return { content: [{ type: "text", text: `confirm_done only valid in VERIFY phase (current: ${state.phase}).` }], isError: true };
+				return { content: [{ type: "text", text: `confirm_done only valid in VERIFY phase (current: ${state.phase}).` }], details: {}, isError: true };
 			}
 			const note = params.note?.trim();
 			exitGate(ctx, "done" + (note ? ` — ${note}` : ""));
-			return { content: [{ type: "text", text: "Confirmed. Exiting gated-goal." }] };
+			return { content: [{ type: "text", text: "Confirmed. Exiting gated-goal." }], details: {} };
 		},
 	});
 
@@ -411,7 +411,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (state.phase !== "verify") {
-				return { content: [{ type: "text", text: `reject_done only valid in VERIFY phase (current: ${state.phase}).` }], isError: true };
+				return { content: [{ type: "text", text: `reject_done only valid in VERIFY phase (current: ${state.phase}).` }], details: {}, isError: true };
 			}
 			// The iteration was already counted when the review ran (entering VERIFY
 			// bumped reviewsCompleted). Rejecting does not double-count. This is
@@ -421,7 +421,7 @@ export default function (pi: ExtensionAPI) {
 			// after the main agent has said the approval was wrong.
 			if (state.reviewsCompleted >= state.maxIteration) {
 				exitGate(ctx, "max iteration reached");
-				return { content: [{ type: "text", text: `Rejected — no iterations left (${state.reviewsCompleted}/${state.maxIteration}). Gated-goal exited.` }] };
+				return { content: [{ type: "text", text: `Rejected — no iterations left (${state.reviewsCompleted}/${state.maxIteration}). Gated-goal exited.` }], details: {} };
 			}
 			state.phase = "act";
 			save(ctx, state);
@@ -430,7 +430,7 @@ export default function (pi: ExtensionAPI) {
 				`🔁 You rejected the reviewer's <promise>DONE</promise> as a rubber-stamp (iteration ${state.reviewsCompleted}/${state.maxIteration}). Reason: ${params.reason}\n\nApply the fix, then stop. The reviewer will run again automatically.`,
 				{ deliverAs: "followUp" },
 			);
-			return { content: [{ type: "text", text: `Rejected — back to ACT. iteration ${state.reviewsCompleted}/${state.maxIteration}.` }] };
+			return { content: [{ type: "text", text: `Rejected — back to ACT. iteration ${state.reviewsCompleted}/${state.maxIteration}.` }], details: {} };
 		},
 	});
 

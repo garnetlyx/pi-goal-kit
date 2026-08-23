@@ -15,7 +15,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { DispatchEntry, DispatchStatus } from "./scheduler.ts";
-import { registry } from "./scheduler.ts";
+import { getFinalOutput, registry } from "./scheduler.ts";
 
 function statusIcon(s: DispatchStatus): string {
 	switch (s) {
@@ -137,15 +137,7 @@ function outputRegion(e: DispatchEntry | undefined, fg: any, width: number, heig
 	// Final/live assistant output (tail to fit). Prefer finalOutput, but also
 	// derive text from captured messages so a just-finished run can never stay
 	// stuck on the placeholder while its final assignment is propagating.
-	let capturedText: string | undefined;
-	for (let i = e.messages.length - 1; i >= 0 && !capturedText; i--) {
-		const message = e.messages[i];
-		if (message.role !== "assistant") continue;
-		for (let j = message.content.length - 1; j >= 0; j--) {
-			const part = message.content[j];
-			if (part.type === "text" && part.text.trim()) { capturedText = part.text; break; }
-		}
-	}
+	const capturedText = getFinalOutput(e.messages);
 	const out = e.finalOutput || capturedText || e.errorMessage || (e.status === "running" ? "(running…)" : "(no output yet)");
 	const outLines = out.split("\n");
 	const remaining = Math.max(0, height - lines.length - 1);

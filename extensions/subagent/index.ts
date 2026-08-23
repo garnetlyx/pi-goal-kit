@@ -45,6 +45,7 @@ import {
 import {
 	type DispatchEntry,
 	genId,
+	markWaitDone,
 	registry,
 	splitModel,
 } from "./scheduler.ts";
@@ -56,12 +57,23 @@ import {
 	matchHint,
 } from "./models.ts";
 
+export function sanitizeNotificationField(value: string, maxLength = 240): string {
+	return value
+		.replace(/[\x00-\x1f\x7f-\x9f]/g, " ")
+		.replace(/;/g, ",")
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, maxLength);
+}
+
 function notifySystem(title: string, body: string): void {
-	// OSC 777 escape is the primary channel — modern terminals
-	// (Windows Terminal, WezTerm, iTerm2, kitty, ...) render it natively
-	// and it needs no host binary, so it works on every platform incl.
-	// Windows Home (which ships no msg.exe).
-	process.stdout.write(`\x1b]777;notify;${title};${body}\x07`);
+	const safeTitle = sanitizeNotificationField(title, 80);
+	const safeBody = sanitizeNotificationField(body);
+	// OSC 777 is a terminal protocol, so write it only to a real TTY and never
+	// allow task text to inject delimiters, BEL, ESC, or other control bytes.
+	if (process.stdout.isTTY) {
+		process.stdout.write(`\x1b]777;notify;${safeTitle};${safeBody}\x07`);
+	}
 
 	// Optional native toast. These commands may be absent (e.g. msg.exe on
 	// Windows Home, notify-send on a minimal box). spawn() reports "command
@@ -72,13 +84,14 @@ function notifySystem(title: string, body: string): void {
 	let cmd: [string, string[]] | null = null;
 	try {
 		if (process.platform === "darwin") {
-			cmd = ["osascript", ["-e", `display notification "${body.replace(/"/g, '\\"')}" with title "${title.replace(/"/g, '\\"')}"`]];
+			const script = "on run argv\n display notification (item 2 of argv) with title (item 1 of argv)\nend run";
+			cmd = ["osascript", ["-e", script, "--", safeTitle, safeBody]];
 		} else if (process.platform === "win32") {
 			// msg.exe requires a session/user target and is missing on Home
 			// editions; skip it and rely on OSC 777 + the shell's own toast.
 			cmd = null;
 		} else {
-			cmd = ["notify-send", [title, body]];
+			cmd = ["notify-send", [safeTitle, safeBody]];
 		}
 		if (cmd) {
 			const child = spawn(cmd[0], cmd[1], { detached: true, stdio: "ignore" });
@@ -121,8 +134,10 @@ export default function (pi: ExtensionAPI) {
 						e.warning = `no output for ${Math.floor(idle / 1000)}s (possibly hung)`;
 						e.status = "hung";
 						registry.changed();
-						notifySystem("⚠️ Pi subagent hung", e.name);
-						ctx.ui.notify(`⚠️ subagent "${e.name}" possibly hung (no output ${Math.floor(idle / 1000)}s)`, "warning");
+						if (ctx.hasUI) {
+							notifySystem("⚠️ Pi subagent hung", e.name);
+							ctx.ui.notify(`⚠️ subagent "${e.name}" possibly hung (no output ${Math.floor(idle / 1000)}s)`, "warning");
+						}
 					}
 				}
 				registry.gc(cfg.defaults.retainCompletedSec);
@@ -130,11 +145,39 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	const finishWait = (entry: DispatchEntry) => {
+		if (markWaitDone(entry)) pi.events.emit("wait:done", { source: "subagent", id: entry.id });
+	};
+
+	const deliverCompletion = (entry: DispatchEntry, ctx: ExtensionContext) => {
+		const finalStatus = entry.status;
+		if (finalStatus === "cancelled" || entry.completionDelivered) return;
+		const retryNote = (entry.retryAttempts ?? 0) > 0 ? ` (auto-retried ${entry.retryAttempts}×)` : "";
+		const stderrTail = (entry as any).stderr ? String((entry as any).stderr).slice(-600).trim() : "";
+		const out = entry.finalOutput || entry.errorMessage || (stderrTail ? `stderr: ${stderrTail}` : "(no output)");
+		const tag = finalStatus === "done" ? "✓" : finalStatus === "timeout" ? "⏱ TIMEOUT" : finalStatus === "hung" ? "⚠ HUNG" : "✗ FAILED";
+		const resume =
+			`↩️ Subagent "${entry.name}" (${entry.model}) finished [${tag}]${retryNote}.\n` +
+			`Task: ${entry.task}\n\n--- output ---\n${out}\n--- end ---\n\n` +
+			`⚠️ This is UNVERIFIED output. Re-check any file changes / commands / key facts before relying on them. (id ${entry.id})`;
+		if (ctx.hasUI) {
+			try { notifySystem(`↩️ Pi subagent ${finalStatus}`, `${entry.name}: ${entry.task.slice(0, 80)}`); } catch { /* best-effort */ }
+			try { ctx.ui.notify(`subagent "${entry.name}" ${finalStatus}`, finalStatus === "done" ? "info" : "warning"); } catch { /* best-effort */ }
+		}
+		pi.sendUserMessage(resume, { deliverAs: "followUp" });
+		entry.completionDelivered = true;
+	};
+
 	pi.on("session_shutdown", async () => {
 		if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
 		for (const e of registry.live()) {
+			e.status = "cancelled";
+			e.endedAt = Date.now();
+			try { e.abort?.(); } catch { /* ignore */ }
 			try { e.kill?.(); } catch { /* ignore */ }
+			finishWait(e);
 		}
+		registry.changed();
 	});
 
 	// ---------------- dispatch tool ----------------
@@ -172,7 +215,7 @@ export default function (pi: ExtensionAPI) {
 			const catalogueBlock = catalogue.length > 0
 				? `${catalogue.slice(0, 60).join("\n")}${catalogue.length > 60 ? `\n... (${catalogue.length - 60} more)` : ""}`
 				: "(none — no models discovered; the child Pi will surface any auth error if you dispatch anyway)";
-			if (names.length === 0) return { content: [{ type: "text", text: `No roles configured. Choose model, permissions, and timeout directly from the current session requirements.\n\nCurrently available models in this session:\n${catalogueBlock}` }] };
+			if (names.length === 0) return { content: [{ type: "text", text: `No roles configured. Choose model, permissions, and timeout directly from the current session requirements.\n\nCurrently available models in this session:\n${catalogueBlock}` }], details: {} };
 
 			const hintLine = (hints: string[]): string => {
 				if (hints.length === 0) return "none";
@@ -202,7 +245,7 @@ export default function (pi: ExtensionAPI) {
 			if (params.role) {
 				const name = params.role;
 				if (!names.includes(name)) {
-					return { content: [{ type: "text", text: `Unknown role "${name}". Available: ${names.join(", ") || "(none)"}` }], isError: true };
+					return { content: [{ type: "text", text: `Unknown role "${name}". Available: ${names.join(", ") || "(none)"}` }], details: {}, isError: true };
 				}
 				const role = cfg.roles[name];
 				const resolved = resolveSystemPrompt(role);
@@ -215,10 +258,10 @@ export default function (pi: ExtensionAPI) {
 					`  system prompt (full):`,
 					resolved.prompt,
 				].join("\n");
-				return { content: [{ type: "text", text: `${detail}\n\nThis is the system prompt that would be injected by default. To pass it through unchanged, omit the dispatch systemPrompt param. To modify it, pass your version via dispatch systemPrompt.\n\nCurrently available models in this session:\n${catalogueBlock}` }] };
+				return { content: [{ type: "text", text: `${detail}\n\nThis is the system prompt that would be injected by default. To pass it through unchanged, omit the dispatch systemPrompt param. To modify it, pass your version via dispatch systemPrompt.\n\nCurrently available models in this session:\n${catalogueBlock}` }], details: {} };
 			}
 
-			return { content: [{ type: "text", text: `${names.map(summarize).join("\n")}\n\nThese are user suggestions, not constraints. The final dispatch model/permissions/timeout must be explicit and may differ for the current task or user request.\n\nCurrently available models in this session (use these for dispatch's model param):\n${catalogueBlock}` }] };
+			return { content: [{ type: "text", text: `${names.map(summarize).join("\n")}\n\nThese are user suggestions, not constraints. The final dispatch model/permissions/timeout must be explicit and may differ for the current task or user request.\n\nCurrently available models in this session (use these for dispatch's model param):\n${catalogueBlock}` }], details: {} };
 		},
 	});
 
@@ -238,7 +281,8 @@ export default function (pi: ExtensionAPI) {
 				description: "Detailed task for the subagent. Include goal, context, constraints, and the exact output format you want back. Vague tasks waste a full model round-trip.",
 			}),
 			timeout: Type.Number({
-				description: "Hard timeout in seconds. Child is killed past this. Local/quantized models often need 600-1800s; cloud APIs 60-300s for most tasks.",
+				exclusiveMinimum: 0,
+				description: "Timeout in seconds for each phase: the dispatch may wait up to this long for a resource-group slot, then the started child may run for up to this long. Worst-case wall time is 2× timeout. Local/quantized models often need 600-1800s of execution time; cloud APIs 60-300s for most tasks.",
 			}),
 			permissions: PermissionsSchema,
 			model: Type.String({
@@ -254,7 +298,7 @@ export default function (pi: ExtensionAPI) {
 			const role = roleName ? cfg.roles[roleName] : undefined;
 			if (roleName && !role) {
 				const roles = Object.keys(cfg.roles);
-				return { content: [{ type: "text", text: `Unknown role "${roleName}". Available: ${roles.join(", ") || "(none)"}` }], isError: true };
+				return { content: [{ type: "text", text: `Unknown role "${roleName}". Available: ${roles.join(", ") || "(none)"}` }], details: {}, isError: true };
 			}
 
 			// Explicit main-agent decisions. Role fields remain advice and prompt
@@ -264,13 +308,14 @@ export default function (pi: ExtensionAPI) {
 			const timeout = params.timeout;
 			const { provider, modelId } = splitModel(modelArg);
 			if (!modelId) {
-				return { content: [{ type: "text", text: `model must be "provider/modelId", got "${modelArg}".` }], isError: true };
+				return { content: [{ type: "text", text: `model must be "provider/modelId", got "${modelArg}".` }], details: {}, isError: true };
 			}
 
 			const catalogue = availableModels(ctx);
 			if (catalogue.length > 0 && !catalogue.includes(modelArg)) {
 				return {
 					content: [{ type: "text", text: `Model "${modelArg}" is not available in this session. Available models: ${catalogue.slice(0, 30).join(", ") || "(none)"}. Choose explicitly based on the current task/user request and retry.` }],
+					details: {},
 					isError: true,
 				};
 			}
@@ -285,11 +330,13 @@ export default function (pi: ExtensionAPI) {
 
 			const id = genId();
 			const name = params.name ?? (roleName ? `${roleName}-${id.slice(-4)}` : `${provider}-${id.slice(-4)}`);
+			const abortController = new AbortController();
 			const entry: DispatchEntry = {
 				id, name, role: roleName, model: modelArg, provider, task: params.task,
 				permissionsLabel: describePermissions(permissions), group,
 				startedAt: Date.now(), lastActivityAt: Date.now(),
 				status: "queued", messages: [],
+				abort: () => abortController.abort(),
 			};
 			registry.add(entry);
 			pi.events.emit("wait:active", { source: "subagent", id: entry.id });
@@ -300,10 +347,41 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`dispatch "${name}": task is short — consider adding detail for better results`, "warning");
 			}
 
-			// Fire and forget. Acquire semaphore, run, then notify.
+			// Fire and forget. Queue waiting is bounded by the explicit timeout; once
+			// the child starts, runChild applies the same timeout to actual execution.
+			let slotHeld = false;
+			const releaseSlot = () => {
+				if (!slotHeld) return;
+				slotHeld = false;
+				sem.release();
+			};
 			void (async () => {
-				await sem.acquire();
-				if (entry.status === "cancelled") { sem.release(); return; }
+				const queueTimer = setTimeout(() => abortController.abort(), timeout * 1000);
+				try {
+					await sem.acquire(abortController.signal);
+					slotHeld = true;
+				} catch (error) {
+					if ((error as Error)?.name === "AbortError" && entry.status === "queued") {
+						entry.status = "timeout";
+						entry.stopReason = "queue_timeout";
+						entry.errorMessage = `timed out waiting ${timeout}s for resource group "${group}"`;
+						entry.endedAt = Date.now();
+						registry.changed();
+						finishWait(entry);
+						deliverCompletion(entry, ctx);
+					} else if ((error as Error)?.name !== "AbortError") {
+						entry.status = "failed";
+						entry.errorMessage = error instanceof Error ? error.message : String(error);
+						entry.endedAt = Date.now();
+						registry.changed();
+						finishWait(entry);
+						deliverCompletion(entry, ctx);
+					}
+					return;
+				} finally {
+					clearTimeout(queueTimer);
+				}
+				if (entry.status === "cancelled") { releaseSlot(); return; }
 				entry.status = "running";
 				entry.lastActivityAt = Date.now();
 				registry.changed();
@@ -313,6 +391,7 @@ export default function (pi: ExtensionAPI) {
 						permissions,
 						systemPrompt: params.systemPrompt ?? resolveSystemPrompt(role).prompt,
 						timeoutSec: timeout,
+						signal: abortController.signal,
 					});
 				} catch (err: any) {
 					entry.status = "failed";
@@ -320,33 +399,28 @@ export default function (pi: ExtensionAPI) {
 					entry.endedAt = Date.now();
 					registry.changed();
 				} finally {
-					sem.release();
+					releaseSlot();
 				}
-				pi.events.emit("wait:done", { source: "subagent", id: entry.id });
-
-				// Wake the main agent.
-				const retryNote = (entry.retryAttempts ?? 0) > 0
-					? ` (auto-retried ${entry.retryAttempts}×)`
-					: "";
-				const stderrTail = (entry as any).stderr ? String((entry as any).stderr).slice(-600).trim() : "";
-				const out = entry.finalOutput
-					|| entry.errorMessage
-					|| (stderrTail ? `stderr: ${stderrTail}` : "(no output)");
-				const tag = entry.status === "done" ? "✓" : entry.status === "timeout" ? "⏱ TIMEOUT" : entry.status === "hung" ? "⚠ HUNG" : "✗ FAILED";
-				const resume =
-					`↩️ Subagent "${entry.name}" (${entry.model}) finished [${tag}]${retryNote}.\n` +
-					`Task: ${entry.task}\n\n--- output ---\n${out}\n--- end ---\n\n` +
-					`⚠️ This is UNVERIFIED output. Re-check any file changes / commands / key facts before relying on them. (id ${entry.id})`;
-				notifySystem(`↩️ Pi subagent ${entry.status}`, `${entry.name}: ${entry.task.slice(0, 80)}`);
-				if (ctx.hasUI) ctx.ui.notify(`subagent "${entry.name}" ${entry.status}`, entry.status === "done" ? "info" : "warning");
-				pi.sendUserMessage(resume, { deliverAs: "followUp" });
-			})();
+				finishWait(entry);
+				deliverCompletion(entry, ctx);
+			})().catch((error) => {
+				releaseSlot();
+				if (entry.status !== "cancelled") {
+					entry.status = "failed";
+					entry.errorMessage ||= error instanceof Error ? error.message : String(error);
+					entry.endedAt ||= Date.now();
+				}
+				try { registry.changed(); } catch { /* a listener caused the rejection */ }
+				try { finishWait(entry); } catch { /* event listeners are external */ }
+				try { deliverCompletion(entry, ctx); } catch { /* host reports delivery errors separately */ }
+			});
 
 			return {
 				content: [{
 					type: "text",
 					text: `Dispatched "${name}" (id ${id}) → ${modelArg}${roleName ? ` [role ${roleName}]` : ""} [group ${group}, perms ${entry.permissionsLabel}]. Model was explicitly selected by the main agent; role suggestions are advisory. Non-blocking — you'll be woken on completion. Status: /subagents.`,
 				}],
+				details: {},
 			};
 		},
 	});
@@ -360,12 +434,12 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({}),
 		async execute() {
 			const all = registry.all();
-			if (all.length === 0) return { content: [{ type: "text", text: "No subagents yet." }] };
+			if (all.length === 0) return { content: [{ type: "text", text: "No subagents yet." }], details: {} };
 			const lines = all.map((e) => {
 				const dur = e.endedAt ? Math.floor((e.endedAt - e.startedAt) / 1000) : Math.floor((Date.now() - e.startedAt) / 1000);
 				return `${e.status.padEnd(8)} ${e.id}  ${e.name}  ${e.model}  ${dur}s${e.warning ? "  " + e.warning : ""}`;
 			});
-			return { content: [{ type: "text", text: lines.join("\n") }] };
+			return { content: [{ type: "text", text: lines.join("\n") }], details: {} };
 		},
 	});
 
@@ -376,13 +450,17 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({ id: Type.String() }),
 		async execute(_id, params) {
 			const e = registry.get(params.id);
-			if (!e) return { content: [{ type: "text", text: `No such id ${params.id}.` }] };
+			if (!e) return { content: [{ type: "text", text: `No such id ${params.id}.` }], details: {} };
+			if (e.status !== "queued" && e.status !== "running" && e.status !== "hung") {
+				return { content: [{ type: "text", text: `${params.id} already ${e.status}.` }], details: {} };
+			}
 			e.status = "cancelled";
 			e.endedAt = Date.now();
-			registry.changed();
+			try { e.abort?.(); } catch { /* ignore */ }
 			try { e.kill?.(); } catch { /* ignore */ }
-			pi.events.emit("wait:done", { source: "subagent", id: params.id });
-			return { content: [{ type: "text", text: `Cancelled ${params.id}.` }] };
+			finishWait(e);
+			registry.changed();
+			return { content: [{ type: "text", text: `Cancelled ${params.id}.` }], details: {} };
 		},
 	});
 

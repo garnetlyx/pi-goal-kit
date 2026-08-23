@@ -17,6 +17,26 @@ import { concurrencyForGroup, groupForProvider } from "./config.ts";
 
 export type DispatchStatus = "queued" | "running" | "done" | "failed" | "timeout" | "cancelled" | "hung";
 
+export function getFinalOutput(messages: Message[]): string {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message.role !== "assistant") continue;
+		const text = message.content
+			.filter((part): part is Extract<(typeof message.content)[number], { type: "text" }> => part.type === "text")
+			.map((part) => part.text)
+			.join("\n");
+		if (text.trim()) return text;
+	}
+	return "";
+}
+
+export function captureMessage(entry: DispatchEntry, message: Message, limit: number): void {
+	entry.messages.push(message);
+	while (entry.messages.length > limit) entry.messages.shift();
+	const latestText = getFinalOutput([message]);
+	if (latestText.trim()) entry.finalOutput = latestText;
+}
+
 export interface DispatchEntry {
 	id: string;
 	name: string;
@@ -38,33 +58,74 @@ export interface DispatchEntry {
 	errorMessage?: string;
 	retryAttempts?: number; // auto_retry attempts observed on the child stream
 	lastStopReason?: string; // stopReason of the final assistant message
-	// internal handle to kill the child process
+	// internal lifecycle handles
 	kill?: () => void;
+	abort?: () => void;
+	waitDoneEmitted?: boolean;
+	completionDelivered?: boolean;
 }
 
 // ---- Semaphore ------------------------------------------------------------
 
-class Semaphore {
-	private available: number;
-	private waiters: (() => void)[] = [];
+export class Semaphore {
+	private limit: number;
+	private inUse = 0;
+	private waiters: Array<{ resolve: () => void; reject: (error: Error) => void; signal?: AbortSignal; onAbort?: () => void }> = [];
 	constructor(limit: number) {
-		this.available = limit;
+		this.limit = normalizedLimit(limit);
 	}
-	async acquire(): Promise<void> {
-		if (this.available > 0) {
-			this.available--;
+	setLimit(limit: number): void {
+		this.limit = normalizedLimit(limit);
+		this.drain();
+	}
+	async acquire(signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) throw abortError();
+		if (this.inUse < this.limit) {
+			this.inUse++;
 			return;
 		}
-		await new Promise<void>((resolve) => this.waiters.push(resolve));
+		await new Promise<void>((resolve, reject) => {
+			const waiter = { resolve, reject, signal, onAbort: undefined as (() => void) | undefined };
+			this.waiters.push(waiter);
+			if (signal) {
+				waiter.onAbort = () => {
+					const index = this.waiters.indexOf(waiter);
+					if (index >= 0) this.waiters.splice(index, 1);
+					reject(abortError());
+				};
+				signal.addEventListener("abort", waiter.onAbort, { once: true });
+				if (signal.aborted) waiter.onAbort();
+			}
+		});
 	}
-	release(): void {
-		if (this.waiters.length > 0) {
-			const next = this.waiters.shift()!;
-			next(); // hand off the slot directly
-		} else {
-			this.available++;
+	release(): boolean {
+		if (this.inUse === 0) {
+			console.warn("[subagent] ignored semaphore release without an acquired slot");
+			return false;
+		}
+		this.inUse--;
+		this.drain();
+		return true;
+	}
+	private drain(): void {
+		while (this.inUse < this.limit) {
+			const next = this.waiters.shift();
+			if (!next) return;
+			if (next.signal && next.onAbort) next.signal.removeEventListener("abort", next.onAbort);
+			this.inUse++;
+			next.resolve();
 		}
 	}
+}
+
+function normalizedLimit(limit: number): number {
+	return Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 1;
+}
+
+function abortError(): Error {
+	const error = new Error("Semaphore acquire cancelled");
+	error.name = "AbortError";
+	return error;
 }
 
 // ---- Registry + Scheduler -------------------------------------------------
@@ -88,10 +149,13 @@ class Registry {
 	}
 
 	semaphoreFor(cfg: SubagentConfig, group: string): Semaphore {
+		const limit = concurrencyForGroup(cfg, group);
 		let s = this.semaphores.get(group);
 		if (!s) {
-			s = new Semaphore(concurrencyForGroup(cfg, group));
+			s = new Semaphore(limit);
 			this.semaphores.set(group, s);
+		} else {
+			s.setLimit(limit);
 		}
 		return s;
 	}
@@ -111,7 +175,7 @@ class Registry {
 		return [...this.entries.values()].sort((a, b) => a.startedAt - b.startedAt);
 	}
 	live(): DispatchEntry[] {
-		return this.all().filter((e) => e.status === "queued" || e.status === "running");
+		return this.all().filter((e) => e.status === "queued" || e.status === "running" || e.status === "hung");
 	}
 	remove(id: string): void {
 		if (this.entries.delete(id)) this.emitChange();
@@ -144,6 +208,12 @@ class Registry {
 const REGISTRY_KEY = Symbol.for("pi-goal-kit.subagent.registry.v1");
 const globalStore = globalThis as Record<symbol, unknown>;
 export const registry: Registry = (globalStore[REGISTRY_KEY] ??= new Registry()) as Registry;
+
+export function markWaitDone(entry: DispatchEntry): boolean {
+	if (entry.waitDoneEmitted) return false;
+	entry.waitDoneEmitted = true;
+	return true;
+}
 
 export function genId(): string {
 	return `d_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
