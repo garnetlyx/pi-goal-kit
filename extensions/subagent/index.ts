@@ -12,8 +12,9 @@
  * the resume text is injected into the current session via
  * pi.sendUserMessage(..., { deliverAs: "followUp" }) plus a system notification.
  *
- * Roles: user suggestions in subagent.json are advisory; the main
- * agent still explicitly chooses the current model/permissions/timeout.
+ * Roles: user suggestions in subagent.json are advisory; suggestedModels
+ * are binding - the main agent picks from them when the role has any.
+ * The main agent still explicitly chooses permissions/timeout.
  *
  * Concurrency: resource groups (defined in subagent.json) share
  * semaphores. Same group = serialized, different groups = parallel. Nothing
@@ -273,7 +274,7 @@ export default function (pi: ExtensionAPI) {
 			"REQUIRED: detailed task, timeout, minimum permissions, and an explicit model (provider/modelId).",
 			`OPTIONAL: role selects a role description plus user suggestions from ${configPath()}; name is a display label.`,
 			"The role's default system prompt is injected as-is UNLESS you pass systemPrompt — inspect it first via subagent_roles (role param) and decide whether to pass it through, edit it, or replace it.",
-			"Role suggestedModels are advisory intent hints (may be fuzzy labels, not exact IDs), never an allowlist or automatic choice. Resolve hints against the current session catalogue; if none fit, explicitly choose another suitable available model.",
+			"Role suggestedModels are binding preferences (hints may be fuzzy labels - resolve them against the current session catalogue). When a dispatched role has suggestedModels, select its model from that list, earlier entries preferred. Choose outside the list only when the user explicitly requested a model this turn, or every suggestion is unavailable or lacks a required capability. Never invent an unavailable model.",
 			"Results are UNVERIFIED — independently re-check file changes, commands, and key facts before relying on them. You cannot dispatch from inside a subagent.",
 		].join("\n"),
 		parameters: Type.Object({
@@ -289,7 +290,7 @@ export default function (pi: ExtensionAPI) {
 				description: 'Model to delegate to, as "provider/modelId". Must be available in the current session catalogue.',
 			}),
 			name: Type.Optional(Type.String({ description: "Display name for this subagent (shown in /subagents and notifications)." })),
-			role: Type.Optional(Type.String({ description: "Optional work role. Its prompt and user preferences are advisory; you still explicitly decide model, permissions, and timeout." })),
+			role: Type.Optional(Type.String({ description: "Optional work role. Its systemPrompt and permission/timeout preferences are advisory - adapt them as the task and model require (e.g., raise the timeout for slow local models); its suggestedModels are binding - pick from them when present." })),
 			systemPrompt: Type.Optional(Type.String({ description: "Override the role's default system prompt. By default the role's user prompt (if set in subagent.json) or the generic default is injected; pass this to pass through a modified version, replace it, or supply one for an ad-hoc dispatch. Inspect the role's default via subagent_roles (role param) first." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -418,7 +419,7 @@ export default function (pi: ExtensionAPI) {
 			return {
 				content: [{
 					type: "text",
-					text: `Dispatched "${name}" (id ${id}) → ${modelArg}${roleName ? ` [role ${roleName}]` : ""} [group ${group}, perms ${entry.permissionsLabel}]. Model was explicitly selected by the main agent; role suggestions are advisory. Non-blocking — you'll be woken on completion. Status: /subagents.`,
+					text: `Dispatched "${name}" (id ${id}) → ${modelArg}${roleName ? ` [role ${roleName}]` : ""} [group ${group}, perms ${entry.permissionsLabel}]. Model chosen by the main agent, from the role's suggestedModels where applicable. Non-blocking — you'll be woken on completion. Status: /subagents.`,
 				}],
 				details: {},
 			};

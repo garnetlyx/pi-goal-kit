@@ -1,6 +1,6 @@
 ---
 name: subagent
-description: "Delegate self-contained work to a subagent by default — exploration, planning, review, implementation, or multimodal reading — unless the task is solvable in a line or a single command. Dispatch is non-blocking, keeps the main context lean, and enables parallel work. Model/permissions/timeout are always main-agent-decided; role preferences are advisory."
+description: "Delegate self-contained work to a subagent by default — exploration, planning, review, implementation, or multimodal reading — unless the task is solvable in a line or a single command. Dispatch is non-blocking, keeps the main context lean, and enables parallel work. Model choice: a role's suggestedModels are binding when present; permissions/timeout are main-agent-decided."
 ---
 
 # Subagent orchestration
@@ -20,10 +20,12 @@ must explicitly choose `model`, `permissions`, and `timeout` based on:
 4. user role suggestions from `subagent.json`;
 5. cost, speed, context size, concurrency, and reliability.
 
-Role `suggestedModels` are ordered preferences, not an allowlist, lock, or
-automatic fallback. A main agent may choose a different model even when a
-suggestion is available. If every suggestion is unavailable or unsuitable,
-choose another suitable available model. Never invent an unavailable model.
+Role `suggestedModels` are binding preferences: when dispatching a role that
+has suggestions, choose its model from that list, earlier entries preferred.
+Leave the list only when the user explicitly requested a specific model this
+turn, or every suggestion is unavailable in the session catalogue or lacks a
+capability the task requires. Roles without suggestions, or role names with no
+preset at all, carry no model constraint. Never invent an unavailable model.
 Use `subagent_roles` when role preferences or current matches are needed.
 
 The session model registry (`models.json` plus any registered providers) is the
@@ -54,8 +56,9 @@ Required:
 
 Optional:
 
-- **`role`** — consult a role's user preferences (model hints, permissions,
-  timeout, optional systemPrompt). It does not choose the model or permissions.
+- **`role`** - consult a role's user preferences (binding model hints, advisory
+  permissions/timeout, optional systemPrompt). It does not choose the model or
+  permissions.
 - **`name`** — display label.
 
 Example:
@@ -76,7 +79,7 @@ dispatch({
 `subagent.json` contains:
 
 - `roles.<name>.suggestedModels`: ordered bare model IDs or
-  `provider/modelId` suggestions;
+  `provider/modelId` suggestions (binding for role dispatches);
 - role descriptions and advisory permission/timeout preferences;
 - `resourceGroups` concurrency limits;
 - `providerGroups` mappings;
@@ -90,8 +93,10 @@ the same preferences apply no matter which project Pi is started from.
 Roles (`explorer`, `planner`, `advisor`, `worker`) live entirely in
 `subagent.json` — each carries its own description, model hints,
 permissions, timeout, and optional systemPrompt. No bundled prompt files.
-A role's fields are advisory; the main agent's explicit dispatch parameters
-(model/permissions/timeout/systemPrompt) always win.
+A role's permission/timeout preferences and systemPrompt are advisory; its
+suggestedModels are binding - the main agent picks from them when present.
+The main agent's explicit dispatch parameters (permissions/timeout/systemPrompt)
+always win.
 
 The file is created with starter roles on first run and never overwritten
 afterwards. It is read per tool call, but tool schemas are fixed at session
