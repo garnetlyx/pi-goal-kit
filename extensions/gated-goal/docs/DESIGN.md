@@ -127,7 +127,7 @@ file, so the last run stays inspectable.
 
 | Command | Effect |
 |---------|--------|
-| `/gated-goal [maxIteration] [reviewerModel]` | Start. If already active, asks to abort+restart. Resolves reviewer model (arg → ui.select → esc=main), pings it, enters P2. |
+| `/gated-goal [maxIteration] [reviewerModel]` | Start. If already active, asks to abort+restart. Resolves reviewer model (arg → searchable picker → esc=main), pings it, enters P2. |
 | `/gated-goal-exit` | Manual abort. Exits with reason "aborted by user". |
 | `/gated-goal-status` | Notify current phase / iteration / reviewer. |
 
@@ -142,7 +142,12 @@ order-tolerant: `/gated-goal 2`, `/gated-goal claude-sonnet-4-5`, and
 ### Model resolution
 
 1. Explicit arg → use it.
-2. Else `availableModels(ctx)` non-empty → `ctx.ui.select` picker (120s timeout).
+2. Else `availableModels(ctx)` non-empty → searchable model picker
+   (`subagent/model-picker.ts`): type to filter by partial provider/id/name,
+   ↑↓/jk move, pgup/pgdn/home/end jump. The built-in `ctx.ui.select` is not
+   used here — it renders every option with no viewport or filtering, so long
+   catalogues overflow the terminal and off-screen models become unreachable.
+   Non-TUI modes (rpc/json/print) fall back to `ui.select`.
    - `availableModels` prefers `ctx.scopedModels` (session-scoped catalogue),
      falls back to enumerating `ctx.modelRegistry`.
 3. Else (or picker cancelled/esc) → main agent's current model

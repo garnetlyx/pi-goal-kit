@@ -13,8 +13,9 @@ with `/gated-goal`.
 
 `/gated-goal [maxIteration] [reviewerModel]`
 - `maxIteration` — default 10. Max number of review rounds before bailing.
-- `reviewerModel` — `provider/modelId`. If omitted, a model picker opens; esc
-  defaults to the main agent's current model.
+- `reviewerModel` — `provider/modelId`. If omitted, a searchable model picker
+  opens (type to filter, ↑↓/jk move, pgup/pgdn/home/end jump); esc defaults to
+  the main agent's current model.
 
 ## Phases
 

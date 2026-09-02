@@ -4,8 +4,8 @@
  *
  *   /gated-goal [maxIteration] [reviewerModel]
  *
- * P1 select-reviewer — pick a reviewer model (arg, or ui.select, or esc = main
- *   model), then ping it with "reply ok". Failure → abort.
+ * P1 select-reviewer — pick a reviewer model (arg, or searchable model
+ *   picker, or esc = main model), then ping it with "reply ok". Failure → abort.
  * P2 plan            — discuss with user; agent calls freeze_plan with the four
  *   sections + todos. Frozen prompt + hash persisted; the todo list is replaced
  *   wholesale with the frozen items (todo:replace event); → P3.
@@ -49,6 +49,7 @@ import {
 } from "./state.ts";
 import { pingReviewer, runReview } from "./reviewer.ts";
 import { availableModels } from "../subagent/models.ts";
+import { pickModel } from "../subagent/model-picker.ts";
 import {
 	TODO_REPLACE_EVENT,
 	TODO_SETTLED_EVENT,
@@ -272,8 +273,11 @@ export default function (pi: ExtensionAPI) {
 					reviewerModel = modelIdOf(ctx);
 					ctx.ui.notify(`No model list available; using main model ${reviewerModel}`, "info");
 				} else {
-					const choice = await ctx.ui.select("Select reviewer model (esc = main agent model):", models, { timeout: 120000 });
-					reviewerModel = choice ?? modelIdOf(ctx);
+					// Searchable, scrollable picker — the built-in ui.select renders every
+				// option with no viewport or filtering, so long catalogues overflow the
+				// terminal and off-screen models become unreachable.
+				const choice = await pickModel(ctx, { title: "Select reviewer model (esc = main agent model)", timeoutMs: 120000 });
+				reviewerModel = choice ?? modelIdOf(ctx);
 				}
 			}
 			if (!reviewerModel) {
