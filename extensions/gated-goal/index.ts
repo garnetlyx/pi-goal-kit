@@ -197,6 +197,21 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			// Not a verdict: the reviewer was killed by its timeout, crashed, or
+			// was cancelled. Truncated output is never a review conclusion, so
+			// charge nothing and go back to ACT (see Iteration accounting).
+			if (result.status !== "done") {
+				state.phase = "act";
+				save(ctx, state);
+				setStatus(ctx);
+				pi.sendUserMessage(
+					`⏱ Reviewer ${result.status === "timeout" ? "hit the review window" : `crashed (${result.status})`} — not a verdict, no iteration charged. ` +
+					`Back to ACT. If this keeps happening, raise \`gatedGoal.reviewTimeoutSec\` in subagent.json.`,
+					{ deliverAs: "followUp" },
+			);
+				return;
+			}
+
 			state.reviewsCompleted = reviewNumber;
 			save(ctx, state);
 

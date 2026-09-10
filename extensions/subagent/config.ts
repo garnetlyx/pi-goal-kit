@@ -111,8 +111,10 @@ export function normalize(raw: any): SubagentConfig {
 	}
 	const rawDefaults = { ...DEFAULT_CONFIG.defaults, ...(raw?.defaults ?? {}) };
 	const positiveInt = (value: unknown, fallback: number): number => {
+		if (typeof value === "boolean") return fallback; // Number(true) === 1 — reject it
 		const n = Number(value);
-		return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+		const floored = Math.floor(n);
+		return Number.isFinite(n) && floored >= 1 ? floored : fallback;
 	};
 	const gg = { ...DEFAULT_CONFIG.gatedGoal, ...(raw?.gatedGoal ?? {}) };
 	return {

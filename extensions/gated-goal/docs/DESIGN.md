@@ -49,8 +49,10 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │   (frozen prompt + hash)│
                                    │ reviewsCompleted++ on   │
                                    │   EITHER verdict — a    │
-                                   │   review that ran is    │
-                                   │   a spent iteration     │
+                                   │   review that returned  │
+                                   │   one is a spent        │
+                                   │   iteration; timeout/   │
+                                   │   crash charges nothing │
                                    │ line starting with
                                    │ <promise>DONE</promise>?
                                    │     ├─ no → >= maxIter? ─► exit: max
@@ -232,7 +234,8 @@ to VERIFY.
 - runs under a hard timeout from user config — `gatedGoal.reviewTimeoutSec`
   in `<agent dir>/subagent.json` (default 1800s), enforced by `runChild`
   (SIGTERM→SIGKILL). On timeout it is treated as a crash: `runReviewCycle`
-  catches, flips back to `act`, notifies. No exit on timeout.
+  catches, flips back to `act`, notifies. No exit on timeout, no iteration
+  charge — a killed review is not a verdict (see Iteration accounting).
 
 **The review window is user-config-only, deliberately out of the main agent's
 reach.** The main agent is the party under review; a party that can set its
@@ -316,10 +319,14 @@ handler-order races between independent `agent_settled` subscribers.
 
 ## Iteration accounting
 
-`reviewsCompleted` is charged in exactly one place: when a review finishes, for
-**either** verdict. A review that ran is a spent iteration regardless of what it
-concluded, so "reviewer not satisfied" and "reviewer said DONE, main agent then
-rejected it" cost the same. `reject_done` deliberately adds nothing on top.
+`reviewsCompleted` is charged in exactly one place: when a review finishes
+with a verdict — **either** verdict. A review that returned a verdict is a
+spent iteration regardless of what it concluded, so "reviewer not satisfied"
+and "reviewer said DONE, main agent then rejected it" cost the same. A review
+that timed out, crashed, or was cancelled produced no verdict (only a cleanly
+finished child can approve, and a truncated changes-list is not a conclusion
+either), so it charges nothing and returns to ACT for a re-run.
+`reject_done` deliberately adds nothing on top.
 
 The cap is checked after the increment on the **rejection** path only: a
 reviewer that asks for changes with no budget left exits "max iteration
@@ -363,7 +370,8 @@ active, plus a phase hint (`acting`, `reviewing`, `verifying`,
 - **Wrap-up compliance is advisory, not enforced.** The time budget in the
   reviewer prompt relies on the model actually running `date +%s` and
   stopping in time. A reviewer that ignores it is still bounded by the hard
-  kill — it just risks a truncated non-verdict and a spent iteration.
+  kill — it just risks a truncated non-verdict (which charges nothing, so the
+  cost is wall-clock, not budget).
 - **`availableModels` is best-effort.** If both scopedModels and registry
   enumeration fail, the picker is skipped and the main model is used silently.
 - **`freeze_plan` requires and replaces todos atomically** — an empty array or

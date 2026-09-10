@@ -17,6 +17,21 @@ describe("subagent config: gatedGoal section", () => {
 		expect(cfg.gatedGoal).toEqual({ reviewTimeoutSec: 1800, pingTimeoutSec: 45 });
 	});
 
+	it("falls back when flooring to zero", () => {
+		const cfg = normalizeConfig({ gatedGoal: { reviewTimeoutSec: 0.5, pingTimeoutSec: 0.9 } });
+		expect(cfg.gatedGoal).toEqual({ reviewTimeoutSec: 1800, pingTimeoutSec: 45 });
+	});
+
+	it("rejects booleans (Number(true) === 1)", () => {
+		const cfg = normalizeConfig({ gatedGoal: { reviewTimeoutSec: true, pingTimeoutSec: false } });
+		expect(cfg.gatedGoal).toEqual({ reviewTimeoutSec: 1800, pingTimeoutSec: 45 });
+	});
+
+	it("accepts numeric strings like the defaults section does", () => {
+		const cfg = normalizeConfig({ gatedGoal: { reviewTimeoutSec: "2400", pingTimeoutSec: "60" } });
+		expect(cfg.gatedGoal).toEqual({ reviewTimeoutSec: 2400, pingTimeoutSec: 60 });
+	});
+
 	it("floors fractional values", () => {
 		const cfg = normalizeConfig({ gatedGoal: { reviewTimeoutSec: 1800.7, pingTimeoutSec: 45.9 } });
 		expect(cfg.gatedGoal).toEqual({ reviewTimeoutSec: 1800, pingTimeoutSec: 45 });

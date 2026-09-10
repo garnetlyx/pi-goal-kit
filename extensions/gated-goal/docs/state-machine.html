@@ -555,7 +555,7 @@ const INFO = {
              'Runs with <code>--no-context-files</code>, so the reviewed project’s own AGENTS.md / CLAUDE.md cannot rewrite the review standard.',
              'Inherits <code>PI_SUBAGENT_CHILD=1</code> → cannot dispatch sub-subagents. Hard timeout from user config (<code>gatedGoal.reviewTimeoutSec</code>, default 1800s) — deliberately no main-agent knob: the reviewed party must not control its own review window.',
              '<code>isApproved()</code> drops fenced code blocks, then requires the tag to <b>start a line</b>; only a child that exited <code>done</code> can approve.',
-             '<code>reviewsCompleted++</code> on <b>either</b> verdict — a review that ran is a spent iteration.',
+             '<code>reviewsCompleted++</code> on <b>either</b> verdict — a review that returned one is a spent iteration; timeout/crash charges nothing.',
              'Hash mismatch is noted and, if possible, recovered from the archive — it never exits the gate.'] },
   verify: { tag:'P5 · gate 2', chip:'phase: verify', sub:'The main agent re-runs the frozen verification itself and judges the real output. This exists because a reviewer emitted DONE without ever running the command.',
     bullets:['<code>confirm_done(note?)</code> → exit “done”.',
