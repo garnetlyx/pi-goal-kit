@@ -165,6 +165,7 @@ describe("subagent extension cancellation", () => {
 		const ctx = executionContext();
 		const cfg = {
 			defaults: { timeoutSec: 600, hungThresholdSec: 120, defaultResourceGroup: "default", retainCompletedSec: 1800, maxCapturedMessages: 1000 },
+			gatedGoal: { reviewTimeoutSec: 1800, pingTimeoutSec: 45 },
 			resourceGroups: { default: { concurrency: 4 } },
 			providerGroups: {},
 			roles: {},

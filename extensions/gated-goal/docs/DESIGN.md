@@ -26,7 +26,7 @@ move together.
 
 ```
 idle ──/gated-goal [N] [model]──► P1 select reviewer
-                                   │ ping "reply ok" (45s timeout)
+                                   │ ping "reply ok" (config: pingTimeoutSec)
                                    ├─ fail ─► abort to idle (no state saved)
                                    ▼
                                  P2 plan
@@ -155,16 +155,19 @@ order-tolerant: `/gated-goal 2`, `/gated-goal claude-sonnet-4-5`, and
 
 ### Connectivity ping (`pingReviewer`)
 
-A 45s reviewer probe with the task "reply with exactly: ok" and a minimal
-read-only system prompt. Adds a throwaway registry entry (so it shows in
+A reviewer probe with the task "reply with exactly: ok" and a minimal
+read-only system prompt. The window comes from user config
+(`gatedGoal.pingTimeoutSec` in `<agent dir>/subagent.json`, default 45s). It
+adds a throwaway registry entry (so it shows in
 `/subagents` and emits `wait:active/done`), then:
 
 - child status ≠ `done` → throw `${status}: ${errorMessage}`
 - final output lacks `ok` (case-insensitive) → throw "returned no 'ok'"
 
 Any throw bubbles to the command handler, which shows an error notify and
-aborts without writing state. Cold local models that need >45s to first token
-will falsely fail — raise the timeout in `pingReviewer` if that bites you.
+aborts without writing state. Cold local models that need more than the
+configured window to first token will falsely fail — raise
+`gatedGoal.pingTimeoutSec` in `subagent.json` if that bites you.
 
 ## Tools
 
@@ -226,15 +229,35 @@ to VERIFY.
   reviewed project's own `AGENTS.md` / `CLAUDE.md` cannot rewrite the review
   standard. Those files load regardless of project trust, so trust settings are
   not a substitute. Ordinary `dispatch` still inherits them by default.
-- has a 1200s hard timeout (`runChild` SIGTERM→SIGKILL); on timeout it is
-  treated as a crash: `runReviewCycle` catches, flips back to `act`, notifies.
-  No exit on timeout.
+- runs under a hard timeout from user config — `gatedGoal.reviewTimeoutSec`
+  in `<agent dir>/subagent.json` (default 1800s), enforced by `runChild`
+  (SIGTERM→SIGKILL). On timeout it is treated as a crash: `runReviewCycle`
+  catches, flips back to `act`, notifies. No exit on timeout.
+
+**The review window is user-config-only, deliberately out of the main agent's
+reach.** The main agent is the party under review; a party that can set its
+own review window can bias the verdict — starving the reviewer into a
+truncated non-verdict, or stretching the window to grind out an approval.
+Like the frozen plan, review process parameters must live outside the
+reviewed party's control surface, so `runReview` reads the value from
+`loadConfig(ctx)` and no tool or parameter exposes it to the main agent.
 
 The review system prompt embeds the frozen prompt verbatim and dictates the
 output contract:
 - **start a line** with `<promise>DONE</promise>`, followed by a one-line
   summary, **only if fully satisfied**;
 - otherwise list concrete required changes, and do not write the tag at all.
+
+It also carries a **time budget** block, because a killed review is never a
+verdict: the prompt states the configured window and the absolute hard-kill
+deadline (spawn time + timeout, as a UTC timestamp plus unix seconds), tells
+the reviewer to plan first (output what it will verify and in what order, then
+execute step by step), and — since mid-run message injection is impossible
+(the child is a one-shot `pi -p` process with stdin ignored) — instructs it to
+self-check the clock with `date +%s` between steps and, once fewer than
+`min(300, timeout/2)` seconds remain, stop verifying and write its final
+verdict immediately: a timely verdict with fewer checks beats a truncated
+one.
 
 `isApproved()` implements that contract: fenced code blocks are dropped, then
 the tag must open a line (whitespace-tolerant inside the tag). A bare substring
@@ -338,8 +361,10 @@ active, plus a phase hint (`acting`, `reviewing`, `verifying`,
   there is no automated pass/fail of command output. If you want hard
   pass/fail, encode it in the verification section and a future extension could
   parse it.
-- **Reviewer ping timeout is fixed at 45s.** Very cold local models may need
-  more.
+- **Wrap-up compliance is advisory, not enforced.** The time budget in the
+  reviewer prompt relies on the model actually running `date +%s` and
+  stopping in time. A reviewer that ignores it is still bounded by the hard
+  kill — it just risks a truncated non-verdict and a spent iteration.
 - **`availableModels` is best-effort.** If both scopedModels and registry
   enumeration fail, the picker is skipped and the main model is used silently.
 - **`freeze_plan` requires and replaces todos atomically** — an empty array or

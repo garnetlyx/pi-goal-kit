@@ -25,6 +25,15 @@ export interface RolePreference {
 
 export type Permissions = "readonly" | "junior" | "full" | string[];
 
+export interface GatedGoalConfig {
+	/** Reviewer review window (P4), seconds. User-owned: the main agent is the
+	 *  party under review and deliberately has no knob for this — see the
+	 *  gated-goal DESIGN.md "Reviewer" section for the rationale. */
+	reviewTimeoutSec: number;
+	/** Connectivity ping window (P1), seconds. Cold local models may need more. */
+	pingTimeoutSec: number;
+}
+
 /** Generic system prompt used when a role sets no `systemPrompt` of its own. */
 export const DEFAULT_SYSTEM_PROMPT = [
 	"You are a delegated subagent operating in an isolated context window.",
@@ -64,6 +73,7 @@ export interface SubagentConfig {
 		retainCompletedSec: number;
 		maxCapturedMessages: number;
 	};
+	gatedGoal: GatedGoalConfig;
 	resourceGroups: Record<string, ResourceGroup>;
 	providerGroups: Record<string, string>;
 	roles: Record<string, RolePreference>;
@@ -77,6 +87,10 @@ const DEFAULT_CONFIG: SubagentConfig = {
 		retainCompletedSec: 1800,
 		maxCapturedMessages: 1000,
 	},
+	gatedGoal: {
+		reviewTimeoutSec: 1800,
+		pingTimeoutSec: 45,
+	},
 	resourceGroups: { default: { concurrency: 4 } },
 	providerGroups: {},
 	roles: {},
@@ -86,7 +100,7 @@ const DEFAULT_CONFIG: SubagentConfig = {
  *  the file lives. Never hardcode it; `getAgentDir()` varies by install. */
 export function configPath(): string { return path.join(getAgentDir(), "subagent.json"); }
 
-function normalize(raw: any): SubagentConfig {
+export function normalize(raw: any): SubagentConfig {
 	const rawRoles = (raw?.roles ?? {}) as Record<string, any>;
 	const roles: Record<string, RolePreference> = {};
 	for (const [name, value] of Object.entries(rawRoles)) {
@@ -96,13 +110,19 @@ function normalize(raw: any): SubagentConfig {
 		roles[name] = { ...value, suggestedModels: suggestions };
 	}
 	const rawDefaults = { ...DEFAULT_CONFIG.defaults, ...(raw?.defaults ?? {}) };
-	const maxCapturedMessages = Number(rawDefaults.maxCapturedMessages);
+	const positiveInt = (value: unknown, fallback: number): number => {
+		const n = Number(value);
+		return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+	};
+	const gg = { ...DEFAULT_CONFIG.gatedGoal, ...(raw?.gatedGoal ?? {}) };
 	return {
 		defaults: {
 			...rawDefaults,
-			maxCapturedMessages: Number.isFinite(maxCapturedMessages) && maxCapturedMessages > 0
-				? Math.floor(maxCapturedMessages)
-				: DEFAULT_CONFIG.defaults.maxCapturedMessages,
+			maxCapturedMessages: positiveInt(rawDefaults.maxCapturedMessages, DEFAULT_CONFIG.defaults.maxCapturedMessages),
+		},
+		gatedGoal: {
+			reviewTimeoutSec: positiveInt(gg.reviewTimeoutSec, DEFAULT_CONFIG.gatedGoal.reviewTimeoutSec),
+			pingTimeoutSec: positiveInt(gg.pingTimeoutSec, DEFAULT_CONFIG.gatedGoal.pingTimeoutSec),
 		},
 		resourceGroups: { ...DEFAULT_CONFIG.resourceGroups, ...(raw?.resourceGroups ?? {}) },
 		providerGroups: { ...(raw?.providerGroups ?? {}) },

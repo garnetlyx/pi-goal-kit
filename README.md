@@ -84,7 +84,7 @@ success criteria mid-task. Completion then needs two independent passes:
 
 ```
 idle ──/gated-goal [N] [model]──► P1 select reviewer
-                                   │ ping "reply ok" (45s timeout)
+                                   │ ping "reply ok" (config: pingTimeoutSec)
                                    ├─ fail ─► abort to idle (no state saved)
                                    ▼
                                  P2 plan

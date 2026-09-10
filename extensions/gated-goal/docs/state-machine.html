@@ -370,7 +370,7 @@ footer a:hover{border-bottom-color:var(--cyan)}
 
   <!-- ─── edge labels ─── -->
   <text class="elabel" x="342" y="82">/gated-goal [N] [model]</text>
-  <text class="elabel elabel--alt" x="203" y="108" text-anchor="end">ping fail · 45s</text>
+  <text class="elabel elabel--alt" x="203" y="108" text-anchor="end">ping fail</text>
   <text class="elabel" x="342" y="200">reply “ok”</text>
   <text class="elabel" x="342" y="325">freeze_plan() → hash · persist · todo:replace</text>
   <text class="elabel" x="342" y="453">todo:settled = review</text>
@@ -398,7 +398,7 @@ footer a:hover{border-bottom-color:var(--cyan)}
   <g class="node" id="n-p1" data-phase="p1" tabindex="0" role="button" aria-label="phase 1 select reviewer">
     <rect class="node__bg" x="220" y="105" width="220" height="66"/>
     <text class="node__tag"  x="236" y="130">P1</text>
-    <text class="node__meta" x="424" y="130" text-anchor="end">ping 45s</text>
+    <text class="node__meta" x="424" y="130" text-anchor="end">ping (cfg window)</text>
     <text class="node__name" x="236" y="156">SELECT REVIEWER</text>
   </g>
 
@@ -535,9 +535,9 @@ const INFO = {
              'Exiting never deletes the state file — the last run stays inspectable.'] },
   p1: { tag:'P1', chip:'phase: (pre-state)', sub:'Resolve the reviewer model, then prove it answers before anything is written to disk.',
     bullets:['Model resolution: explicit arg → <code>ctx.ui.select</code> picker (120s) → main agent’s current model.',
-             '<code>pingReviewer</code> sends “reply with exactly: ok” with a 45s budget and a minimal read-only prompt.',
+             '<code>pingReviewer</code> sends “reply with exactly: ok” with the configured ping budget (<code>gatedGoal.pingTimeoutSec</code> in subagent.json, default 45s) and a minimal read-only prompt.',
              'Child status ≠ <code>done</code>, or output lacking “ok”, throws → error notify, abort, <b>no state saved</b>.',
-             'Cold local models needing more than 45s to first token will falsely fail here.'] },
+             'Cold local models needing more than the configured window to first token will falsely fail here.'] },
   plan: { tag:'P2', chip:'phase: plan', sub:'Agent and user align on the goal, then the plan is frozen — hashed, persisted, and mirrored into the todo list.',
     bullets:['<code>freeze_plan(outcome, verification, constraints, quality, todos)</code> is the only exit.',
              'Builds the canonical four-section prompt, sha256-hashes it, stores both in state.',
@@ -553,7 +553,7 @@ const INFO = {
   review: { tag:'P4 · gate 1', chip:'phase: review', sub:'An independent reviewer subagent checks the work against the frozen plan. It can rubber-stamp, which is why it is not the last word.',
     bullets:['Permissions fixed at read/grep/find/ls/bash — no write or edit. bash is not sandboxed, so this is an instruction, not a boundary.',
              'Runs with <code>--no-context-files</code>, so the reviewed project’s own AGENTS.md / CLAUDE.md cannot rewrite the review standard.',
-             'Inherits <code>PI_SUBAGENT_CHILD=1</code> → cannot dispatch sub-subagents. Hard timeout 1200s.',
+             'Inherits <code>PI_SUBAGENT_CHILD=1</code> → cannot dispatch sub-subagents. Hard timeout from user config (<code>gatedGoal.reviewTimeoutSec</code>, default 1800s) — deliberately no main-agent knob: the reviewed party must not control its own review window.',
              '<code>isApproved()</code> drops fenced code blocks, then requires the tag to <b>start a line</b>; only a child that exited <code>done</code> can approve.',
              '<code>reviewsCompleted++</code> on <b>either</b> verdict — a review that ran is a spent iteration.',
              'Hash mismatch is noted and, if possible, recovered from the archive — it never exits the gate.'] },
@@ -600,7 +600,7 @@ const E = {
     run(){ S.phase='plan'; S.reviewerPermissions = PERMS; S.originalCwd = CWD;
       return { edge:'e-ping-ok', node:'plan', tone:'go', msg:'ping ok → <b>P2 PLAN</b> · state file created' }; } },
 
-  ping_fail: { label:'ping timeout', note:'45s elapsed / no "ok"', tone:'bad', from:['p1'],
+  ping_fail: { label:'ping timeout', note:'ping window elapsed / no "ok"', tone:'bad', from:['p1'],
     run(){ S = EMPTY(); S.maxIteration = maxPref;
       return { edge:'e-ping-fail', node:'abortping', tone:'bad', msg:'ping failed → abort · <b>no state saved</b>' }; } },
 
@@ -634,7 +634,7 @@ const E = {
       return { edge:'e-changes', node:'act', tone:'amber',
         msg:`changes requested · reviewsCompleted → <b>${S.reviewsCompleted}/${S.maxIteration}</b> · back to <b>ACT</b>` }; } },
 
-  review_crash: { label:'reviewer timeout', note:'1200s · SIGTERM', tone:'bad', from:['review'],
+  review_crash: { label:'reviewer timeout', note:'review window elapsed · SIGTERM', tone:'bad', from:['review'],
     run(){ S.phase='act';
       return { edge:'e-changes', node:'act', tone:'bad',
         msg:'review crashed — not a verdict, <b>no charge</b> · back to <b>ACT</b>' }; } },
