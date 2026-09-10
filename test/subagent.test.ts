@@ -1,8 +1,19 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { Message } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import subagentExtension from "../extensions/subagent/index.ts";
+
+// These tests exercise the full extension, but a host pi child process (e.g.
+// the gated-goal reviewer) runs the suite with PI_SUBAGENT_CHILD=1, which
+// makes the extension a no-op at registration time. Isolate from the host
+// environment so `bun run test` passes inside subagent processes too.
+const savedChildFlag = process.env.PI_SUBAGENT_CHILD;
+delete process.env.PI_SUBAGENT_CHILD;
+afterAll(() => {
+	if (savedChildFlag === undefined) delete process.env.PI_SUBAGENT_CHILD;
+	else process.env.PI_SUBAGENT_CHILD = savedChildFlag;
+});
 import { createProcessTerminator, runChild } from "../extensions/subagent/runner.ts";
 import { captureMessage, genId, getFinalOutput, markWaitDone, registry, Semaphore, type DispatchEntry } from "../extensions/subagent/scheduler.ts";
 import { sanitizeNotificationField } from "../extensions/subagent/index.ts";

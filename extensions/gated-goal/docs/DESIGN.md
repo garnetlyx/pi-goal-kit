@@ -254,10 +254,9 @@ deadline (spawn time + timeout, as a UTC timestamp plus unix seconds), tells
 the reviewer to plan first (output what it will verify and in what order, then
 execute step by step), and — since mid-run message injection is impossible
 (the child is a one-shot `pi -p` process with stdin ignored) — instructs it to
-self-check the clock with `date +%s` between steps and, once fewer than
-`min(300, timeout/2)` seconds remain, stop verifying and write its final
-verdict immediately: a timely verdict with fewer checks beats a truncated
-one.
+self-check the clock with `date +%s` between steps and, once fewer than 300
+seconds remain, stop verifying and write its final verdict immediately: a
+timely verdict with fewer checks beats a truncated one.
 
 `isApproved()` implements that contract: fenced code blocks are dropped, then
 the tag must open a line (whitespace-tolerant inside the tag). A bare substring

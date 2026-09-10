@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { normalize as normalizeConfig } from "../extensions/subagent/config.ts";
-import { buildReviewerSystemPrompt, wrapUpThresholdSec } from "../extensions/gated-goal/reviewer.ts";
+import { buildReviewerSystemPrompt, WRAP_UP_LEAD_SEC } from "../extensions/gated-goal/reviewer.ts";
 
 describe("subagent config: gatedGoal section", () => {
 	it("falls back to defaults when the section is missing", () => {
@@ -41,7 +41,7 @@ describe("reviewer system prompt", () => {
 
 	it("states the wrap-up rule with the clamped threshold", () => {
 		const p = buildReviewerSystemPrompt("PLAN", { timeoutSec: 1800, nowMs });
-		expect(p).toContain("fewer than 300 seconds remain");
+		expect(p).toContain(`fewer than ${WRAP_UP_LEAD_SEC} seconds remain`);
 		expect(p).toContain("A killed review is never a verdict");
 	});
 
@@ -55,13 +55,8 @@ describe("reviewer system prompt", () => {
 	});
 });
 
-describe("wrapUpThresholdSec", () => {
-	it("is 300s for the default 30-minute window", () => {
-		expect(wrapUpThresholdSec(1800)).toBe(300);
-	});
-
-	it("clamps to half the window on short budgets", () => {
-		expect(wrapUpThresholdSec(100)).toBe(50);
-		expect(wrapUpThresholdSec(60)).toBe(30);
+describe("wrap-up lead", () => {
+	it("is the frozen 300-second contract", () => {
+		expect(WRAP_UP_LEAD_SEC).toBe(300);
 	});
 });

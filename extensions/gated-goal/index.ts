@@ -276,7 +276,7 @@ export default function (pi: ExtensionAPI) {
 					// Searchable, scrollable picker — the built-in ui.select renders every
 				// option with no viewport or filtering, so long catalogues overflow the
 				// terminal and off-screen models become unreachable.
-				const choice = await pickModel(ctx, { title: "Select reviewer model (esc = main agent model)", timeoutMs: 120000 });
+				const choice = await pickModel(ctx, { title: "Select reviewer model (esc = main agent model)", timeoutMs: 120 * 1000 });
 				reviewerModel = choice ?? modelIdOf(ctx);
 				}
 			}

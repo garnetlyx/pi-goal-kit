@@ -65,11 +65,8 @@ function buildReviewerEntry(opts: { name: string; model: string; task: string; g
 }
 
 /** Seconds before the hard kill at which the reviewer must stop verifying and
- *  write its verdict. Clamped so it can never exceed half the window — a
- *  60-second ping-style window still gets a sane wrap-up point. */
-export function wrapUpThresholdSec(timeoutSec: number): number {
-	return Math.min(300, Math.floor(timeoutSec / 2));
-}
+ *  write its verdict (frozen-plan contract: "<300s remaining → wrap up"). */
+export const WRAP_UP_LEAD_SEC = 300;
 
 function formatDuration(sec: number): string {
 	if (sec % 60 === 0) return `${sec / 60} minute${sec === 60 ? "" : "s"}`;
@@ -85,7 +82,7 @@ export function buildReviewerSystemPrompt(frozenPrompt: string, opts: { timeoutS
 	const d = new Date(deadlineMs);
 	const pad = (n: number) => String(n).padStart(2, "0");
 	const deadlineUtc = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} UTC`;
-	const wrapSec = wrapUpThresholdSec(timeoutSec);
+	const wrapSec = WRAP_UP_LEAD_SEC;
 	return [
 		"You are a strict reviewer subagent operating in an isolated context window.",
 		"You cannot dispatch further subagents. You have no write or edit tools: read files, search, and run verification commands (tests, build, git diff).",
