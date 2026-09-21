@@ -76,7 +76,7 @@ export function availableModels(ctx: ExtensionContext): string[] {
 /**
  * Resolve a (possibly fuzzy) role hint against the session catalogue.
  *
- * Role suggestedModels are advisory intent labels — they may be exact
+ * Role suggestedModels are binding intent labels — they may be exact
  * ("openai/gpt-5.1"), a bare id ("gpt-5.1"), or a fuzzy label like "GPT" or
  * "claude". We match case-insensitively against provider/id and name so a
  * hint surfaces the concrete models the agent can actually dispatch to.
