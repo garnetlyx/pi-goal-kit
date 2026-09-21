@@ -64,7 +64,9 @@ a new canned tool per wait type. The conversation never blocks.
 the agent stops with incomplete todos *and nothing else is being waited on*, a
 follow-up nudges it to continue. A naive nudge fires on every stop, including
 correct ones ("the build is running"), which teaches the agent to ignore it.
-This one stays silent while any wait is active.
+This one stays silent while any wait is active. Long lists fold in the widget
+(done items first, then earliest); `/todos` opens a scrollable popup with the
+whole list.
 
 **subagent** — delegates a self-contained task to a model in a separate `pi`
 subprocess with its own context, tool whitelist, and timeout. User config

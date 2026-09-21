@@ -72,4 +72,6 @@ The list is stored in tool-result details (not external files), so it is
 automatically correct for the current branch — forking or navigating the
 session tree restores the state as of that point in history.
 
-`/todos` command also prints the list.
+Long lists (10+ items) are folded in the below-editor widget — done items
+first, then the earliest — with a `… N hidden — /todos for all` summary line.
+`/todos` opens a scrollable popup showing every item.

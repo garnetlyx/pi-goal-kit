@@ -33,6 +33,7 @@ really does continue (costing tokens; this is intentional).
 | Path | Purpose |
 |------|---------|
 | `extensions/todo/index.ts` | `todo` tool, `/todos` command, `agent_settled` hook, active-wait listener, below-editor widget |
+| `extensions/todo/panel.ts` | `/todos` popup — windowed scrollable overlay showing the whole list |
 | `extensions/todo/SKILL.md` | agent-facing instructions |
 
 ## `todo` tool
@@ -77,11 +78,32 @@ work and misleading progress.
 ## Widget
 
 `ctx.ui.setWidget("todo", lines, { placement: "belowEditor" })` whenever the
-list changes. Empty list clears the widget (`setWidget("todo", undefined)`); a fully-done
-list stays visible so the user can see what was accomplished this round.
-`/todos` or the `clear` action empties it.
+list changes. Empty list clears the widget (`setWidget("todo", undefined)`);
+a fully-done list stays visible (folded to the latest done items) so the user
+can see what was accomplished this round. `clear` empties it.
 Each line: `<glyph> #<id> <text>` where glyph is `○` (todo), `◐` (pending),
 `✓` (done, dimmed).
+
+pi's interactive mode renders at most 10 widget lines per widget and cuts the
+tail beyond that (`... (widget truncated)`). The widget budgets itself to stay
+under the cap (`MAX_WIDGET_LINES` in `index.ts`): up to 9 items fit whole; a
+longer list is folded to 8 items plus a dim summary line — `done` items are
+dropped first (the header already counts them), then the earliest items, so
+the latest incomplete work stays visible (`chooseWidgetWindow`, pure, exported
+for tests). The summary reads e.g. `… 3 done, 2 earlier hidden — /todos for
+all`.
+
+## `/todos` popup
+
+`/todos` opens the full-list view in `panel.ts`: a `ctx.ui.custom` overlay in
+the same visual pattern as the `/subagents` panel and the `/reminders` view —
+bordered box with the `Todos (done/total)` summary riding the top border, a
+cursor-following windowed list (`↑↓/jk`, pgup/pgdn, home/end), above/below
+counters, and a key-hint footer. A 1s signature poll re-renders when the list
+changes underneath, so items the agent completes while the panel is open flip
+to done live. `esc`/`q`/`enter` closes. Non-TUI modes fall back to notifying
+the widget lines as text. The popup is display-only — mutations go through
+the `todo` tool so they persist in the session branch.
 
 ## Completion nudge
 

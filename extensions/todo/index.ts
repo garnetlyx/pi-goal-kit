@@ -43,6 +43,7 @@ import {
 	TODO_SETTLED_EVENT,
 	TODO_STATE_ENTRY,
 } from "./snapshot.ts";
+import { openTodosPanel } from "./panel.ts";
 
 interface TodoDetails {
 	action: string;
@@ -72,6 +73,63 @@ const STATUS_GLYPH: Record<TodoStatus, string> = {
 
 function isIncomplete(t: Todo): boolean {
 	return t.status !== "done";
+}
+
+// pi's interactive mode renders at most 10 widget lines per widget and, beyond
+// that, bluntly cuts the tail ("... (widget truncated)"). Stay under the cap:
+// 1 header + up to 9 items, or 1 header + 8 items + 1 summary when folded.
+const MAX_WIDGET_LINES = 10;
+
+/** Which items a size-capped widget should show, and what got folded away.
+ * Pure — keep exported for tests. */
+export function chooseWidgetWindow(
+	todos: Todo[],
+	maxItems: number,
+): { visible: Todo[]; hiddenDone: number; hiddenEarlier: number } {
+	// Fold `done` items first (least actionable — the header already counts
+	// them), then the earliest items, so the latest incomplete work stays
+	// visible. When only done items exist, keep the latest ones so the round's
+	// results remain readable.
+	const incomplete = todos.filter(isIncomplete);
+	const done = todos.filter((t) => t.status === "done");
+	const keepIncomplete = Math.min(incomplete.length, maxItems);
+	const keepDone = Math.min(done.length, maxItems - keepIncomplete);
+	// slice(-0) would copy the whole array — guard both zero cases.
+	const keepInc = keepIncomplete > 0 ? incomplete.slice(-keepIncomplete) : [];
+	const keepDn = keepDone > 0 ? done.slice(-keepDone) : [];
+	const keep = new Set([...keepInc, ...keepDn].map((t) => t.id));
+	return {
+		visible: todos.filter((t) => keep.has(t.id)), // original order
+		hiddenDone: done.length - keepDone,
+		hiddenEarlier: incomplete.length - keepIncomplete,
+	};
+}
+
+const DIM = "\x1b[2m";
+const UNDIM = "\x1b[22m";
+
+/** Widget lines for a todo list, budgeted to MAX_WIDGET_LINES. */
+export function widgetLines(todos: Todo[]): string[] {
+	const done = todos.filter((t) => t.status === "done").length;
+	const lines: string[] = [`Todos (${done}/${todos.length})`];
+	let visible = todos;
+	let folded: ReturnType<typeof chooseWidgetWindow> | undefined;
+	if (todos.length > MAX_WIDGET_LINES - 1) {
+		folded = chooseWidgetWindow(todos, MAX_WIDGET_LINES - 2); // -2: header + summary
+		visible = folded.visible;
+	}
+	for (const t of visible) {
+		const mark = STATUS_GLYPH[t.status];
+		const text = t.status === "done" ? `${DIM}${t.text}${UNDIM}` : t.text;
+		lines.push(`${mark} #${t.id} ${text}`);
+	}
+	if (folded) {
+		const parts: string[] = [];
+		if (folded.hiddenDone > 0) parts.push(`${folded.hiddenDone} done`);
+		if (folded.hiddenEarlier > 0) parts.push(`${folded.hiddenEarlier} earlier`);
+		lines.push(`${DIM}… ${parts.join(", ")} hidden — /todos for all${UNDIM}`);
+	}
+	return lines;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -105,14 +163,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.setWidget("todo", undefined, { placement: "belowEditor" });
 			return;
 		}
-		const done = todos.filter((t) => t.status === "done").length;
-		const lines: string[] = [`Todos (${done}/${todos.length})`];
-		for (const t of todos) {
-			const mark = STATUS_GLYPH[t.status];
-			const text = t.status === "done" ? `\x1b[2m${t.text}\x1b[22m` : t.text;
-			lines.push(`${mark} #${t.id} ${text}`);
-		}
-		ctx.ui.setWidget("todo", lines, { placement: "belowEditor" });
+		ctx.ui.setWidget("todo", widgetLines(todos), { placement: "belowEditor" });
 	};
 
 	pi.on("session_start", async (_event, ctx) => reconstructState(ctx));
@@ -279,17 +330,21 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("todos", {
-		description: "List current todos",
+		description: "Show all todos in a scrollable popup",
 		handler: async (_args, ctx) => {
 			if (todos.length === 0) {
 				ctx.ui.notify("No todos", "info");
 				return;
 			}
-			const done = todos.filter((t) => t.status === "done").length;
-			const lines = [`Todos (${done}/${todos.length}):`];
-			for (const t of todos) lines.push(`${STATUS_GLYPH[t.status]} #${t.id} ${t.text}`);
-			ctx.ui.setWidget("todo-cmd", lines, { placement: "belowEditor" });
-			ctx.ui.notify(`${todos.length} todos — ${done} done`, "info");
+			// Older versions rendered this command as a second below-editor widget,
+			// which hit the same core 10-line widget cap. Clear any such widget, then
+			// open the focused popup (same pattern as /subagents and /reminders).
+			ctx.ui.setWidget("todo-cmd", undefined, { placement: "belowEditor" });
+			if (!ctx.hasUI || ctx.mode !== "tui") {
+				ctx.ui.notify(widgetLines(todos).join("\n"), "info");
+				return;
+			}
+			await openTodosPanel(ctx, () => todos);
 		},
 	});
 }
