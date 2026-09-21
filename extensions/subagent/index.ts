@@ -202,8 +202,8 @@ export default function (pi: ExtensionAPI) {
 		description: [
 			`List user-configured subagent roles from ${configPath()}, AND list the models currently available in this session (provider/modelId).`,
 			"Use this as the discovery tool before dispatch: it returns the session catalogue so you can pick a concrete model instead of guessing.",
-			"Model hints are advisory intent labels (may be fuzzy like 'GPT' or 'claude'), not exact IDs — the output shows which hints match a currently available model.",
-			"Suggestions are advisory; use current user/session requirements for the explicit dispatch parameters.",
+			"Model hints are intent labels (may be fuzzy like 'GPT' or 'claude'), not exact IDs — the output shows which hints match a currently available model and names the preferred pick.",
+			"When dispatching with a role, default to its 'preferred model now'. Choose a different model only when the user explicitly requested one this turn, no hint matches the session, or the matches lack a capability the task requires.",
 		].join("\n"),
 		parameters: Type.Object({
 			role: Type.Optional(Type.String({ description: "If set, show full details (including the complete system prompt that would be injected) for this single role. Omit to list all roles as a summary." })),
@@ -228,6 +228,14 @@ export default function (pi: ExtensionAPI) {
 				}).join(", ");
 			};
 
+			const preferredModel = (hints: string[]): string | undefined => {
+				for (const h of hints) {
+					const matches = matchHint(h, records);
+					if (matches.length > 0) return `${matches[0].provider}/${matches[0].id}`;
+				}
+				return undefined;
+			};
+
 			const summarize = (name: string): string => {
 				const role = cfg.roles[name];
 				const hints = role?.suggestedModels ?? [];
@@ -237,7 +245,8 @@ export default function (pi: ExtensionAPI) {
 					: `${resolved.source} override, ${resolved.prompt.length} chars (pass role="${name}" to view in full)`;
 				return [
 					`${name}: ${role?.description ?? ""}`,
-					`  model hints (advisory, fuzzy ok): ${hintLine(hints)}`,
+					`  model hints (fuzzy ok, pick from these when dispatching this role): ${hintLine(hints)}`,
+					`  preferred model now: ${preferredModel(hints) ?? "none of the hints match this session"}`,
 					`  preferences: permissions=${Array.isArray(role?.permissions) ? role.permissions.join(",") : role?.permissions ?? "none"}, suggested timeout=${role?.timeoutSec ?? 900}s`,
 					`  system prompt: ${promptLabel}`,
 				].join("\n");
@@ -253,7 +262,8 @@ export default function (pi: ExtensionAPI) {
 				const hints = role?.suggestedModels ?? [];
 				const detail = [
 					`${name}: ${role?.description ?? ""}`,
-					`  model hints (advisory, fuzzy ok): ${hintLine(hints)}`,
+					`  model hints (fuzzy ok, pick from these when dispatching this role): ${hintLine(hints)}`,
+					`  preferred model now: ${preferredModel(hints) ?? "none of the hints match this session — pick another suitable model"}`,
 					`  preferences: permissions=${Array.isArray(role?.permissions) ? role.permissions.join(",") : role?.permissions ?? "none"}, suggested timeout=${role?.timeoutSec ?? 900}s`,
 					`  system prompt source: ${resolved.source}`,
 					`  system prompt (full):`,
@@ -262,7 +272,7 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: `${detail}\n\nThis is the system prompt that would be injected by default. To pass it through unchanged, omit the dispatch systemPrompt param. To modify it, pass your version via dispatch systemPrompt.\n\nCurrently available models in this session:\n${catalogueBlock}` }], details: {} };
 			}
 
-			return { content: [{ type: "text", text: `${names.map(summarize).join("\n")}\n\nThese are user suggestions, not constraints. The final dispatch model/permissions/timeout must be explicit and may differ for the current task or user request.\n\nCurrently available models in this session (use these for dispatch's model param):\n${catalogueBlock}` }], details: {} };
+			return { content: [{ type: "text", text: `${names.map(summarize).join("\n")}\n\nWhen dispatching with a role, pick its model from the hint matches — 'preferred model now' is the default answer, earlier hints preferred. Deviate only when the user explicitly requested a model this turn, no hint matches, or the matches lack a capability the task needs. Permissions and timeout remain your explicit decision.\n\nCurrently available models in this session (use these for dispatch's model param):\n${catalogueBlock}` }], details: {} };
 		},
 	});
 
