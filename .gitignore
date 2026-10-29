@@ -27,3 +27,6 @@ settings.json
 
 # Logs
 *.log
+
+# Local lockfile (the repository tracks no lockfile)
+bun.lock
