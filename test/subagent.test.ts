@@ -305,6 +305,49 @@ describe("subagent process termination", () => {
 		child.emit("close", null, "SIGTERM");
 	});
 
+	it("never passes Bun's virtual entry path as a script argument", async () => {
+		// Bun-compiled binaries report their bundled entry point as argv[1].
+		// On Windows that path lives in "B:/~BUN/root/..." (and "~BUN" or
+		// "%7EBUN" in other layouts). It is not a real file, so passing it on
+		// makes the child process run the wrong program.
+		for (const virtualScript of ["B:/~BUN/root/pi", "B:\\~BUN\\root\\pi", "/$bunfs/root/pi", "file:///%7EBUN/root/pi"]) {
+			const item = entry("running");
+			registry.add(item);
+			const previousArgv1 = process.argv[1];
+			process.argv[1] = virtualScript;
+			const child = new EventEmitter() as any;
+			child.stdout = new PassThrough();
+			child.stderr = new PassThrough();
+			child.kill = vi.fn(() => true);
+			const spawnProcess = vi.fn(() => {
+				queueMicrotask(() => child.emit("spawn"));
+				return child;
+			});
+
+			try {
+				const running = runChild({
+					pi: {} as any,
+					ctx: { cwd: process.cwd() } as any,
+					entry: item,
+					modelArg: "test/model",
+					permissions: [],
+					timeoutSec: 60,
+					spawnProcess: spawnProcess as any,
+				});
+				await new Promise<void>((resolve) => child.once("spawn", resolve));
+				child.emit("close", 0, null);
+				await running;
+			} finally {
+				process.argv[1] = previousArgv1;
+			}
+
+			const [, spawnArgs] = spawnProcess.mock.calls[0] as unknown as [string, string[]];
+			expect(spawnArgs[0]).not.toBe(virtualScript);
+			expect(spawnArgs[0]).not.toContain("~BUN");
+			expect(spawnArgs[0]).not.toContain("$bunfs");
+		}
+	});
+
 	it("escalates from SIGTERM to SIGKILL when the process remains open", () => {
 		vi.useFakeTimers();
 		const kill = vi.fn(() => true);

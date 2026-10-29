@@ -77,7 +77,15 @@ async function writeTempPrompt(name: string, prompt: string): Promise<{ dir: str
 
 function piInvocation(args: string[]): { command: string; args: string[] } {
 	const currentScript = process.argv[1];
-	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
+	// A Bun-compiled binary reports its bundled entry point as argv[1], which
+	// lives in Bun's virtual filesystem ("/$bunfs/root/..." on Unix,
+	// "B:/~BUN/root/..." on Windows, "%7EBUN" when URL-encoded). It exists for
+	// Bun's loader but not on disk, so it must never be passed on as a script
+	// argument; the executable alone is the entry point. The markers match the
+	// ones pi core uses to detect the same virtual filesystem.
+	const isBunVirtualScript =
+		!!currentScript &&
+		(currentScript.includes("$bunfs") || currentScript.includes("~BUN") || currentScript.includes("%7EBUN"));
 	if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
 		return { command: process.execPath, args: [currentScript, ...args] };
 	}
