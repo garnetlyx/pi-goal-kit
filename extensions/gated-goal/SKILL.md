@@ -65,7 +65,8 @@ gated-goal exits, reason **max iteration reached**.
 
 ### P5 — verify (your independent check)
 Only reached after the reviewer says DONE. You must independently re-run the
-frozen verification commands yourself and **subjectively judge** whether the
+frozen verification commands yourself (the handoff includes the complete
+multiline Verification section) and **subjectively judge** whether the
 work genuinely satisfies the plan — reviewers sometimes approve without
 actually checking. Then:
 - `confirm_done` (optional note) → gated-goal exits, reason **done**.

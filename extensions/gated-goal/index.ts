@@ -58,8 +58,9 @@ import {
 } from "../todo/snapshot.ts";
 
 /** Extract a `## Section` body from the frozen prompt. Returns "(not specified)" if absent. */
-function extractSection(prompt: string, name: string): string {
-	const re = new RegExp(`^## ${name}\\s*\\n([\\s\\S]*?)(?=\\n^## |$)`, "m");
+export function extractSection(prompt: string, name: string): string {
+	// In multiline mode `$` also matches every line end, not just the input end.
+	const re = new RegExp(`^## ${name}\\s*\\n([\\s\\S]*?)(?=\\n^## |(?![\\s\\S]))`, "m");
 	const m = prompt.match(re);
 	return m ? m[1].trim() : "(not specified)";
 }

@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { normalize as normalizeConfig } from "../extensions/subagent/config.ts";
+import { extractSection } from "../extensions/gated-goal/index.ts";
+
+describe("frozen verification handoff", () => {
+	it("preserves every command and blank line before the next section", () => {
+		const verification = "Run independently.\nV1: acceptance\n\nV2: inspect output\n### Details\nV3: integrity";
+		expect(extractSection(`## Outcome\nDeliver\n\n## Verification\n${verification}\n\n## Constraints\nNo edits`, "Verification")).toBe(verification);
+	});
+
+	it("preserves a final multiline section through end of input", () => {
+		expect(extractSection("## Verification\nV1\nV2\n", "Verification")).toBe("V1\nV2");
+	});
+
+	it("reports a missing section", () => {
+		expect(extractSection("## Outcome\nDeliver", "Verification")).toBe("(not specified)");
+	});
+});
 import { buildReviewerSystemPrompt, WRAP_UP_LEAD_SEC } from "../extensions/gated-goal/reviewer.ts";
 
 describe("subagent config: gatedGoal section", () => {
