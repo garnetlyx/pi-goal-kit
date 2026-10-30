@@ -79,6 +79,12 @@ every agent in YAML and redeploy to add one. The same stack serves both
 **collaboration** (parallel delegation) and **adversarial QA** (gated-goal's
 read-only reviewer).
 
+The child locates the host `pi` binary even when the running process reports
+it as Bun's Windows virtual entry path (`B:/~BUN/root/pi`), so dispatch and
+the reviewer spawn correctly on Windows as well as macOS/Linux (fixed in
+v0.1.2; on earlier versions a Windows dispatch stayed `running` until its
+timeout).
+
 **gated-goal** — started by `/gated-goal [maxIteration] [reviewerModel]`.
 `freeze_plan` captures outcome, verification, constraints, and quality bars,
 then hashes and persists them, so the agent cannot quietly relax its own
@@ -183,7 +189,10 @@ they follow whatever `pi` itself is using.
 
 ## Requirements
 
-[Pi](https://pi.dev) **0.84.1 or later**. Depends only on Pi's own runtime
+[Pi](https://pi.dev) **0.84.1 or later**; the full kit was exercised
+end-to-end on **1.4.0** (Windows, RPC-supervised: two complete gated-goal
+loops with real reviewer rejections, reminder wake-ups, todo nudges, and MCP
+calls). Depends only on Pi's own runtime
 types (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`,
 `@earendil-works/pi-tui`, `typebox`) — no extra npm packages. Consumers do not
 need to install these; `pi` resolves them at load time.
