@@ -37,6 +37,37 @@ import { Type } from "typebox";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 
+/**
+ * pi >= 1.5 throws "Cannot submit a prompt while compaction is in progress"
+ * for prompts arriving during a manual /compact instead of queuing them. This
+ * call site fires from wall-clock callbacks (timer/condition completions) that
+ * cannot know whether the user is mid-compaction, so retry until the window
+ * passes (15 x 20s = 5min coverage; compaction runs tens of seconds).
+ *
+ * Duplicated in subagent/index.ts on purpose: extensions install flat
+ * (state/agent/extensions/<name>/) and cannot import across dirs.
+ * Remove once upstream queues extension follow-ups during compaction instead
+ * of throwing.
+ */
+export const COMPACTION_BUSY_SNIPPET = "Cannot submit a prompt while compaction is in progress";
+const SEND_RETRY_DELAY_MS = 20_000;
+export const SEND_RETRY_MAX_ATTEMPTS = 15;
+
+export async function sendFollowUpWithCompactionRetry(pi: ExtensionAPI, text: string): Promise<void> {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			await pi.sendUserMessage(text, { deliverAs: "followUp" });
+			return;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (attempt >= SEND_RETRY_MAX_ATTEMPTS || !message.includes(COMPACTION_BUSY_SNIPPET)) {
+				throw error;
+			}
+			await new Promise((resolve) => setTimeout(resolve, SEND_RETRY_DELAY_MS));
+		}
+	}
+}
+
 interface Reminder {
 	id: string;
 	message: string; // resume prompt the agent left for itself
@@ -171,7 +202,10 @@ export default function (pi: ExtensionAPI) {
 		const prefix = opts.timeout
 			? `⏰ Reminder "${label}" TIMED OUT after waiting. Give up, change approach, or re-arm.\n\n`
 			: `⏰ Reminder "${label}" fired.\n\n`;
-		pi.sendUserMessage(prefix + r.message, { deliverAs: "followUp" });
+		void sendFollowUpWithCompactionRetry(pi, prefix + r.message).catch((error) => {
+			const message = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`reminder "${label}" delivery failed: ${message}`, "warning");
+		});
 	}
 
 	// The condition executor. Windows has no `bash` by default, so we prefer

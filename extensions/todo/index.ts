@@ -65,6 +65,11 @@ const TodoParams = Type.Object({
 	status: Type.Optional(StatusSchema),
 });
 
+// pi 1.5 tool-param inference degrades Optional(StringEnum) params to {};
+// validate against the known statuses at runtime instead of trusting the
+// inferred type.
+const TODO_STATUSES: readonly TodoStatus[] = ["todo", "pending", "done"];
+
 const STATUS_GLYPH: Record<TodoStatus, string> = {
 	todo: "○",
 	pending: "◐",
@@ -284,7 +289,12 @@ export default function (pi: ExtensionAPI) {
 						error = `#${params.id} not found`;
 						break;
 					}
-					t.status = params.status;
+					const status = TODO_STATUSES.find((s) => s === params.status);
+					if (!status) {
+						error = "status must be todo, pending, or done";
+						break;
+					}
+					t.status = status;
 					resetNudgeSig();
 					break;
 				}
