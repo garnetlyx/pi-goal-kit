@@ -12,8 +12,13 @@
  * the resume text is injected into the current session via
  * pi.sendUserMessage(..., { deliverAs: "followUp" }) plus a system notification.
  *
- * Roles: user suggestions in subagent.json are advisory; suggestedModels
- * are binding - the main agent picks from them when the role has any.
+ * Roles: user suggestions in subagent.json are advisory; the role's
+ * models.suggested list is binding - the main agent picks from it when the
+ * role has one. A top-level models.blacklist fences the agent's autonomous
+ * dispatch: blacklisted models (case-insensitive substring on provider/id or
+ * display name) are refused by the dispatch tool and hidden from the
+ * subagent_roles catalogue. Human model picks (e.g. the gated-goal reviewer
+ * picker) are never filtered.
  * The main agent still explicitly chooses permissions/timeout.
  *
  * Concurrency: resource groups (defined in subagent.json) share
@@ -37,6 +42,7 @@ import {
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
+	blockedBy,
 	configPath,
 	ensureConfigTemplate,
 	loadConfig,
@@ -85,9 +91,23 @@ export async function sendFollowUpWithCompactionRetry(pi: ExtensionAPI, text: st
 }
 import {
 	availableModelRecords,
-	availableModels,
+	dispatchableModelRecords,
 	matchHint,
+	type AvailableModel,
 } from "./models.ts";
+
+/** Hints for a dispatch context: the role's models.suggested first, then the
+ *  global models.suggested as fallback. Deduped, order preserved. */
+function hintsFor(cfg: ReturnType<typeof loadConfig>, role: ReturnType<typeof loadConfig>["roles"][string] | undefined): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const hint of [...(role?.models?.suggested ?? []), ...cfg.models.suggested]) {
+		if (seen.has(hint)) continue;
+		seen.add(hint);
+		out.push(hint);
+	}
+	return out;
+}
 
 export function sanitizeNotificationField(value: string, maxLength = 240): string {
 	return value
@@ -236,6 +256,7 @@ export default function (pi: ExtensionAPI) {
 		description: [
 			`List user-configured subagent roles from ${configPath()}, AND list the models currently available in this session (provider/modelId).`,
 			"Use this as the discovery tool before dispatch: it returns the session catalogue so you can pick a concrete model instead of guessing.",
+			"Models matching models.blacklist in subagent.json are excluded from the catalogue and from suggestion resolution — they cannot be dispatched as subagents.",
 			"Model hints are intent labels (may be fuzzy like 'GPT' or 'claude'), not exact IDs — the output shows which hints match a currently available model and names the preferred pick.",
 			"When dispatching with a role, default to its 'preferred model now'. Choose a different model only when the user explicitly requested one this turn, no hint matches the session, or the matches lack a capability the task requires.",
 		].join("\n"),
@@ -245,41 +266,49 @@ export default function (pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const cfg = loadConfig(ctx);
 			const names = Object.keys(cfg.roles).sort();
-			const records = availableModelRecords(ctx);
+			const allRecords = availableModelRecords(ctx);
+			const records = dispatchableModelRecords(ctx, cfg);
+			const hiddenCount = allRecords.length - records.length;
+			const blacklistNote = hiddenCount > 0
+				? `\n(${hiddenCount} model${hiddenCount === 1 ? "" : "s"} hidden by models.blacklist in subagent.json — not dispatchable)`
+				: "";
 			const catalogue = records.map((m) => `${m.provider}/${m.id}`);
 			const catalogueBlock = catalogue.length > 0
-				? `${catalogue.slice(0, 60).join("\n")}${catalogue.length > 60 ? `\n... (${catalogue.length - 60} more)` : ""}`
-				: "(none — no models discovered; the child Pi will surface any auth error if you dispatch anyway)";
-			if (names.length === 0) return { content: [{ type: "text", text: `No roles configured. Choose model, permissions, and timeout directly from the current session requirements.\n\nCurrently available models in this session:\n${catalogueBlock}` }], details: {} };
+				? `${catalogue.slice(0, 60).join("\n")}${catalogue.length > 60 ? `\n... (${catalogue.length - 60} more)` : ""}${blacklistNote}`
+				: `(none dispatchable${allRecords.length > 0 ? ` — all ${allRecords.length} excluded by models.blacklist` : " — no models discovered; the child Pi will surface any auth error if you dispatch anyway)"}`;
+			if (names.length === 0) return { content: [{ type: "text", text: `No roles configured. Choose model, permissions, and timeout directly from the current session requirements${cfg.models.suggested.length > 0 ? `, preferring models.suggested order` : ""}.\n\nCurrently available models in this session:\n${catalogueBlock}` }], details: {} };
 
 			const hintLine = (hints: string[]): string => {
 				if (hints.length === 0) return "none";
 				return hints.map((h) => {
-					const matches = matchHint(h, records);
-					return matches.length > 0
-						? `${h} → ${matches.map((m) => `${m.provider}/${m.id}`).slice(0, 5).join(", ")}`
-						: `${h} (no match in session)`;
+					const matches = matchHint(h, allRecords);
+					const allowed = matches.filter((m) => !blockedBy(cfg, m));
+					if (allowed.length > 0) {
+						return `${h} → ${allowed.map((m) => `${m.provider}/${m.id}`).slice(0, 5).join(", ")}`;
+					}
+					if (matches.length > 0) return `${h} (all matches excluded by blacklist)`;
+					return `${h} (no match in session)`;
 				}).join(", ");
 			};
 
 			const preferredModel = (hints: string[]): string | undefined => {
 				for (const h of hints) {
-					const matches = matchHint(h, records);
-					if (matches.length > 0) return `${matches[0].provider}/${matches[0].id}`;
+					const allowed = matchHint(h, allRecords).filter((m) => !blockedBy(cfg, m));
+					if (allowed.length > 0) return `${allowed[0].provider}/${allowed[0].id}`;
 				}
 				return undefined;
 			};
 
 			const summarize = (name: string): string => {
 				const role = cfg.roles[name];
-				const hints = role?.suggestedModels ?? [];
+				const hints = hintsFor(cfg, role);
 				const resolved = resolveSystemPrompt(role);
 				const promptLabel = resolved.source === "default"
 					? "default generic prompt"
 					: `${resolved.source} override, ${resolved.prompt.length} chars (pass role="${name}" to view in full)`;
 				return [
 					`${name}: ${role?.description ?? ""}`,
-					`  model hints (fuzzy ok, pick from these when dispatching this role): ${hintLine(hints)}`,
+					`  model hints (role models.suggested first, global fallback; pick from these when dispatching this role): ${hintLine(hints)}`,
 					`  preferred model now: ${preferredModel(hints) ?? "none of the hints match this session"}`,
 					`  preferences: permissions=${Array.isArray(role?.permissions) ? role.permissions.join(",") : role?.permissions ?? "none"}, suggested timeout=${role?.timeoutSec ?? 900}s`,
 					`  system prompt: ${promptLabel}`,
@@ -293,10 +322,10 @@ export default function (pi: ExtensionAPI) {
 				}
 				const role = cfg.roles[name];
 				const resolved = resolveSystemPrompt(role);
-				const hints = role?.suggestedModels ?? [];
+				const hints = hintsFor(cfg, role);
 				const detail = [
 					`${name}: ${role?.description ?? ""}`,
-					`  model hints (fuzzy ok, pick from these when dispatching this role): ${hintLine(hints)}`,
+					`  model hints (role models.suggested first, global fallback; pick from these when dispatching this role): ${hintLine(hints)}`,
 					`  preferred model now: ${preferredModel(hints) ?? "none of the hints match this session — pick another suitable model"}`,
 					`  preferences: permissions=${Array.isArray(role?.permissions) ? role.permissions.join(",") : role?.permissions ?? "none"}, suggested timeout=${role?.timeoutSec ?? 900}s`,
 					`  system prompt source: ${resolved.source}`,
@@ -318,7 +347,8 @@ export default function (pi: ExtensionAPI) {
 			"REQUIRED: detailed task, timeout, minimum permissions, and an explicit model (provider/modelId).",
 			`OPTIONAL: role selects a role description plus user suggestions from ${configPath()}; name is a display label.`,
 			"The role's default system prompt is injected as-is UNLESS you pass systemPrompt — inspect it first via subagent_roles (role param) and decide whether to pass it through, edit it, or replace it.",
-			"Role suggestedModels are binding preferences (hints may be fuzzy labels - resolve them against the current session catalogue). When a dispatched role has suggestedModels, select its model from that list, earlier entries preferred. Choose outside the list only when the user explicitly requested a model this turn, or every suggestion is unavailable or lacks a required capability. Never invent an unavailable model.",
+			"Role models.suggested are binding preferences (hints may be fuzzy labels - resolve them against the current session catalogue). When a dispatched role has models.suggested, select its model from that list, earlier entries preferred; the global models.suggested is the fallback when the role gives none. Choose outside the list only when the user explicitly requested a model this turn, or every suggestion is unavailable or lacks a required capability. Never invent an unavailable model.",
+			"Models matching models.blacklist in subagent.json (case-insensitive substring on provider/id or display name) are refused as subagents — pick from the allowed catalogue and retry.",
 			"Results are UNVERIFIED — independently re-check file changes, commands, and key facts before relying on them. You cannot dispatch from inside a subagent.",
 		].join("\n"),
 		parameters: Type.Object({
@@ -334,7 +364,7 @@ export default function (pi: ExtensionAPI) {
 				description: 'Model to delegate to, as "provider/modelId". Must be available in the current session catalogue.',
 			}),
 			name: Type.Optional(Type.String({ description: "Display name for this subagent (shown in /subagents and notifications)." })),
-			role: Type.Optional(Type.String({ description: "Optional work role. Its systemPrompt and permission/timeout preferences are advisory - adapt them as the task and model require (e.g., raise the timeout for slow local models); its suggestedModels are binding - pick from them when present." })),
+			role: Type.Optional(Type.String({ description: "Optional work role. Its systemPrompt and permission/timeout preferences are advisory - adapt them as the task and model require (e.g., raise the timeout for slow local models); its models.suggested are binding - pick from them when present." })),
 			systemPrompt: Type.Optional(Type.String({ description: "Override the role's default system prompt. By default the role's user prompt (if set in subagent.json) or the generic default is injected; pass this to pass through a modified version, replace it, or supply one for an ad-hoc dispatch. Inspect the role's default via subagent_roles (role param) first." })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -356,10 +386,28 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: `model must be "provider/modelId", got "${modelArg}".` }], details: {}, isError: true };
 			}
 
-			const catalogue = availableModels(ctx);
+			const catalogueRecords = availableModelRecords(ctx);
+			const catalogue = catalogueRecords.map((m) => `${m.provider}/${m.id}`);
 			if (catalogue.length > 0 && !catalogue.includes(modelArg)) {
 				return {
 					content: [{ type: "text", text: `Model "${modelArg}" is not available in this session. Available models: ${catalogue.slice(0, 30).join(", ") || "(none)"}. Choose explicitly based on the current task/user request and retry.` }],
+					details: {},
+					isError: true,
+				};
+			}
+			// Blacklist hard gate: fences the agent's autonomous choice only.
+			// Human picks (gated-goal reviewer picker, reviewer spawn) never pass
+			// through this tool, so they are exempt by construction.
+			const matched = catalogueRecords.find((m) => `${m.provider}/${m.id}` === modelArg);
+			const blacklistPattern = blockedBy(cfg, matched ?? { provider, id: modelId });
+			if (blacklistPattern) {
+				const allowed = dispatchableModelRecords(ctx, cfg).map((m) => `${m.provider}/${m.id}`);
+				const roleHints = role?.models?.suggested ?? [];
+				const roleNote = roleHints.length > 0
+					? `\nRole "${roleName}" models.suggested (filtered): ${roleHints.join(", ")}`
+					: "";
+				return {
+					content: [{ type: "text", text: `Model "${modelArg}" is blocked by models.blacklist in subagent.json (matched pattern "${blacklistPattern}") and cannot be dispatched as a subagent. Do not retry this model — re-dispatch with one of the allowed models below, honoring the role's models.suggested where applicable.${roleNote}\nAllowed models: ${allowed.slice(0, 30).join(", ") || "(none)"}${allowed.length > 30 ? ` ... (${allowed.length - 30} more)` : ""}` }],
 					details: {},
 					isError: true,
 				};
@@ -463,7 +511,7 @@ export default function (pi: ExtensionAPI) {
 			return {
 				content: [{
 					type: "text",
-					text: `Dispatched "${name}" (id ${id}) → ${modelArg}${roleName ? ` [role ${roleName}]` : ""} [group ${group}, perms ${entry.permissionsLabel}]. Model chosen by the main agent, from the role's suggestedModels where applicable. Non-blocking — you'll be woken on completion. Status: /subagents.`,
+					text: `Dispatched "${name}" (id ${id}) → ${modelArg}${roleName ? ` [role ${roleName}]` : ""} [group ${group}, perms ${entry.permissionsLabel}]. Model chosen by the main agent, from the role's models.suggested where applicable. Non-blocking — you'll be woken on completion. Status: /subagents.`,
 				}],
 				details: {},
 			};

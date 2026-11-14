@@ -16,17 +16,32 @@ There are three deliberately non-overlapping sources:
 | Source | Sole responsibility |
 |---|---|
 | Pi session model registry (`models.json` plus registered providers) | factual model availability |
-| `subagent.json` | single user-owned source: role suggestions, resource/concurrency configuration, and optional role system prompts |
+| `subagent.json` | single user-owned source: model policy (suggestions + blacklist), role suggestions, resource/concurrency configuration, and optional role system prompts |
 | `extensions/subagent/SKILL.md` | main-agent decision policy and tool usage |
 
 `subagent.json` is resolved through Pi's agent directory, not `ctx.cwd`, so
 the same preferences apply no matter which project Pi is started from.
 
-Role `suggestedModels` are ordered advice, not an allowlist or fallback
+Role `models.suggested` are ordered advice, not an allowlist or fallback
 algorithm. Suggestions may be bare model IDs (match any available provider) or
 fully-qualified `provider/modelId`. The main agent may ignore an available
 suggestion when the current task or user request warrants it. If none are
-available, it chooses another suitable model from the current session.
+available, it chooses another suitable model from the current session. The
+global `models.suggested` list is the fallback when a role gives none.
+
+Blacklist: `models.blacklist` is a hard fence around the **agent's**
+autonomous dispatch — not around human choices. Patterns are matched
+case-insensitively as substrings against `provider/id` and the display name,
+so `gpt` blocks `gpt-5.6-sol`, `gpt-6-astra`, and any provider carrying such
+IDs; a provider fragment blocks a whole provider. The `dispatch` tool refuses
+blocked models with an error that names the matched pattern and lists allowed
+models, and `subagent_roles` hides them from the catalogue, hint resolution,
+and the preferred pick (reporting how many were hidden). Surfaces where a
+human explicitly picks — the gated-goal reviewer model picker, and the
+reviewer spawn path itself, which bypasses `dispatch` — use the unfiltered
+catalogue by construction. The main session's own model is never affected.
+Empty or missing `suggested`/`blacklist` mean no constraint; entries are
+treated as plain strings, never as allowlist or regex.
 
 Role prompts: a role's `systemPrompt` field in `subagent.json` is a *suggested*
 prompt, not a forced injection. The main agent may pass it through, edit it,
@@ -147,10 +162,14 @@ Text status list / cancellation by id.
   "providerGroups": {
     "some-local-provider": "local-gpu"
   },
+  "models": {
+    "suggested": ["provider/global-preferred"],
+    "blacklist": ["gpt"]
+  },
   "roles": {
     "explorer": {
       "description": "Fast reconnaissance",
-      "suggestedModels": ["fast-model", "provider/backup-model"],
+      "models": { "suggested": ["fast-model", "provider/backup-model"] },
       "permissions": "readonly",
       "timeoutSec": 900,
       "systemPrompt": "optional; replaces the generic default for this role"
@@ -163,7 +182,10 @@ Text status list / cancellation by id.
 Concurrency changes apply to new dispatches; reducing a limit does not stop
 active children. `maxCapturedMessages` bounds panel/debug history while final
 assistant text is retained separately. Model preferences live in
-`suggestedModels`.
+`models.suggested` (global fallback) and `roles.<name>.models.suggested`
+(role binding); `models.blacklist` fences agent dispatch. Configs written in
+the pre-rename flat `suggestedModels` role shape are normalized by dropping
+that key unread — re-add suggestions under `models.suggested`.
 
 ## `/subagents` panel
 

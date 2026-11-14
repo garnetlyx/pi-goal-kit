@@ -21,6 +21,7 @@
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { blockedBy, type SubagentConfig } from "./config.ts";
 
 export interface AvailableModel {
 	provider: string;
@@ -73,10 +74,18 @@ export function availableModels(ctx: ExtensionContext): string[] {
 	return availableModelRecords(ctx).map((m) => `${m.provider}/${m.id}`);
 }
 
+/** Session catalogue minus the blacklist — what the AGENT may dispatch to.
+ *  Human-facing surfaces (model picker, reviewer selection) must use the
+ *  unfiltered availableModelRecords/availableModels instead: the blacklist
+ *  fences the agent's autonomous choice, not user picks. */
+export function dispatchableModelRecords(ctx: ExtensionContext, cfg: SubagentConfig): AvailableModel[] {
+	return availableModelRecords(ctx).filter((m) => !blockedBy(cfg, m));
+}
+
 /**
  * Resolve a (possibly fuzzy) role hint against the session catalogue.
  *
- * Role suggestedModels are binding intent labels — they may be exact
+ * Role models.suggested are binding intent labels — they may be exact
  * ("openai/gpt-5.1"), a bare id ("gpt-5.1"), or a fuzzy label like "GPT" or
  * "claude". We match case-insensitively against provider/id and name so a
  * hint surfaces the concrete models the agent can actually dispatch to.

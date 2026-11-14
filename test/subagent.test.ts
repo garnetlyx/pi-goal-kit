@@ -1,4 +1,7 @@
 import { EventEmitter } from "node:events";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { PassThrough } from "node:stream";
 import type { Message } from "@earendil-works/pi-ai";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +19,7 @@ afterAll(() => {
 });
 import { createProcessTerminator, runChild } from "../extensions/subagent/runner.ts";
 import { captureMessage, genId, getFinalOutput, markWaitDone, registry, Semaphore, type DispatchEntry } from "../extensions/subagent/scheduler.ts";
+import { blockedBy, isModelBlockedBy, normalize as normalizeConfig } from "../extensions/subagent/config.ts";
 import { sanitizeNotificationField } from "../extensions/subagent/index.ts";
 
 function entry(status: DispatchEntry["status"]): DispatchEntry {
@@ -55,17 +59,34 @@ function extensionHarness() {
 	return { pi, tools, handlers, emitted };
 }
 
-function executionContext(model = { provider: "test", id: "model", name: "model" }) {
+type TestModel = { provider: string; id: string; name: string };
+
+function executionContext(models: TestModel | TestModel[] = { provider: "test", id: "model", name: "model" }) {
+	const list = Array.isArray(models) ? models : [models];
 	return {
 		cwd: process.cwd(),
 		hasUI: false,
 		ui: { notify: vi.fn() },
-		scopedModels: [{ model }],
+		scopedModels: list.map((model) => ({ model })),
 		modelRegistry: {
-			getAvailable: () => [model],
-			getAll: () => [model],
+			getAvailable: () => list,
+			getAll: () => list,
 		},
 	} as any;
+}
+
+/** Point PI_CODING_AGENT_DIR at a temp dir with a controlled subagent.json
+ *  so loadConfig (read per tool call) sees exactly this policy. */
+function useAgentConfig(cfg: Record<string, unknown>): () => void {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-test-"));
+	fs.writeFileSync(path.join(dir, "subagent.json"), JSON.stringify(cfg));
+	const saved = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = dir;
+	return () => {
+		if (saved === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = saved;
+		fs.rmSync(dir, { recursive: true, force: true });
+	};
 }
 
 afterEach(() => {
@@ -179,6 +200,7 @@ describe("subagent extension cancellation", () => {
 			gatedGoal: { reviewTimeoutSec: 1800, pingTimeoutSec: 45 },
 			resourceGroups: { default: { concurrency: 4 } },
 			providerGroups: {},
+			models: { suggested: [], blacklist: [] },
 			roles: {},
 		};
 		const semaphore = registry.semaphoreFor(cfg, "default");
@@ -411,5 +433,195 @@ describe("subagent output extraction", () => {
 			{ role: "assistant", content: [{ type: "toolCall", id: "call-2", name: "read", arguments: {} }] },
 		] as unknown as Message[];
 		expect(getFinalOutput(messages)).toBe("the real answer");
+	});
+});
+
+describe("subagent config: models policy section", () => {
+	it("defaults to empty suggested and blacklist", () => {
+		expect(normalizeConfig({}).models).toEqual({ suggested: [], blacklist: [] });
+	});
+
+	it("reads user values", () => {
+		const cfg = normalizeConfig({ models: { suggested: ["a/m1", "m2"], blacklist: ["gpt", "GEMINI"] } });
+		expect(cfg.models).toEqual({ suggested: ["a/m1", "m2"], blacklist: ["gpt", "GEMINI"] });
+	});
+
+	it("filters non-strings, nulls, and blank entries", () => {
+		const cfg = normalizeConfig({ models: { suggested: [123, "", "   ", "ok", null], blacklist: [false, "gpt", 7, " "] } });
+		expect(cfg.models).toEqual({ suggested: ["ok"], blacklist: ["gpt"] });
+	});
+
+	it("accepts empty lists as no constraint", () => {
+		const cfg = normalizeConfig({ models: { suggested: [], blacklist: [] } });
+		expect(cfg.models).toEqual({ suggested: [], blacklist: [] });
+	});
+
+	it("parses role models.suggested and drops the legacy flat key unread", () => {
+		const cfg = normalizeConfig({ roles: { explorer: { suggestedModels: ["old/model"], models: { suggested: ["new/model"] }, permissions: "readonly" } } });
+		expect(cfg.roles.explorer.models).toEqual({ suggested: ["new/model"] });
+		expect((cfg.roles.explorer as any).suggestedModels).toBeUndefined();
+	});
+
+	it("gives roles without models an empty suggested list", () => {
+		const cfg = normalizeConfig({ roles: { worker: { permissions: "junior" } } });
+		expect(cfg.roles.worker.models).toEqual({ suggested: [] });
+	});
+});
+
+describe("blacklist matching", () => {
+	const cfg = normalizeConfig({ models: { blacklist: ["gpt", "KIMI", "local-m4m"] } });
+
+	it("matches id substrings case-insensitively in both directions", () => {
+		expect(isModelBlockedBy("gpt", { provider: "openai", id: "gpt-5.6-sol" })).toBe(true);
+		expect(isModelBlockedBy("KIMI", { provider: "test", id: "kimi-k3" })).toBe(true);
+		expect(isModelBlockedBy("kimi", { provider: "test", id: "kimi-k3", name: "Kimi K3" })).toBe(true);
+	});
+
+	it("matches the display name as well as provider/id", () => {
+		expect(isModelBlockedBy("kimmy", { provider: "test", id: "unrelated", name: "The Kimmy Model" })).toBe(true);
+		expect(blockedBy(cfg, { provider: "test", id: "unrelated", name: "GPT-6 Astra" })).toBe("gpt");
+	});
+
+	it("blocks a whole provider via a provider substring", () => {
+		expect(blockedBy(cfg, { provider: "local-m4m-proxy", id: "glm-5.3" })).toBe("local-m4m");
+	});
+
+	it("does not match unrelated models, missing names, or empty patterns", () => {
+		expect(blockedBy(cfg, { provider: "test", id: "glm-5.3", name: "GLM 5.3" })).toBeUndefined();
+		expect(blockedBy(normalizeConfig({}), { provider: "openai", id: "gpt-5" })).toBeUndefined();
+		expect(isModelBlockedBy("", { provider: "openai", id: "gpt-5" })).toBe(false);
+		expect(isModelBlockedBy("   ", { provider: "openai", id: "gpt-5" })).toBe(false);
+	});
+
+	it("reports the first matching pattern", () => {
+		const multi = normalizeConfig({ models: { blacklist: ["zzz-first-nope", "glm"] } });
+		expect(blockedBy(multi, { provider: "test", id: "glm-5.3" })).toBe("glm");
+	});
+});
+
+describe("dispatch blacklist gate", () => {
+	it("refuses a blacklisted model before queuing", async () => {
+		const restore = useAgentConfig({ models: { blacklist: ["kimi"] }, roles: { reviewer: { description: "d", models: { suggested: ["kimi"] } } } });
+		try {
+			const { tools, emitted } = extensionHarness();
+			const ctx = executionContext({ provider: "test", id: "kimi-k3", name: "Kimi K3" });
+
+			const result = await tools.get("dispatch").execute("call", {
+				task: "try to use a blacklisted model",
+				timeout: 60,
+				permissions: "readonly",
+				model: "test/kimi-k3",
+				role: "reviewer",
+				name: "test-blocked",
+			}, undefined, undefined, ctx);
+
+			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain('matched pattern "kimi"');
+			expect(result.content[0].text).toContain("cannot be dispatched as a subagent");
+			expect(result.content[0].text).toContain('Role "reviewer" models.suggested');
+			expect(registry.all().find((candidate) => candidate.name === "test-blocked")).toBeUndefined();
+			expect(emitted.filter((event) => event.name === "wait:active")).toHaveLength(0);
+		} finally {
+			restore();
+		}
+	});
+
+	it("lets a non-blacklisted model pass the gate into the queue", async () => {
+		vi.useFakeTimers();
+		const restore = useAgentConfig({ models: { blacklist: ["kimi"] }, roles: {} });
+		try {
+			const { tools } = extensionHarness();
+			const ctx = executionContext();
+			const cfg = normalizeConfig({});
+			const semaphore = registry.semaphoreFor(cfg, "default");
+			await Promise.all([semaphore.acquire(), semaphore.acquire(), semaphore.acquire(), semaphore.acquire()]);
+			try {
+				const result = await tools.get("dispatch").execute("call", {
+					task: "allowed model passes the blacklist gate and queues",
+					timeout: 1,
+					permissions: [],
+					model: "test/model",
+					name: "test-gate-pass",
+				}, undefined, undefined, ctx);
+				expect(result.content[0].text).toContain("Dispatched");
+				expect(registry.all().find((candidate) => candidate.name === "test-gate-pass")?.status).toBe("queued");
+				await vi.advanceTimersByTimeAsync(1000);
+			} finally {
+				semaphore.release();
+				semaphore.release();
+				semaphore.release();
+				semaphore.release();
+				vi.useRealTimers();
+			}
+		} finally {
+			restore();
+		}
+	});
+});
+
+describe("subagent_roles blacklist filtering", () => {
+	it("hides blacklisted models from the catalogue, hints, and preferred pick", async () => {
+		const restore = useAgentConfig({
+			models: { suggested: ["model"], blacklist: ["KIMI"] },
+			roles: { explorer: { description: "d", models: { suggested: ["kimi", "model"] } } },
+		});
+		try {
+			const { tools } = extensionHarness();
+			const ctx = executionContext([
+				{ provider: "test", id: "model", name: "model" },
+				{ provider: "test", id: "kimi-k3", name: "Kimi K3" },
+			]);
+
+			const result = await tools.get("subagent_roles").execute("call", {}, undefined, undefined, ctx);
+			const text = result.content[0].text;
+
+			expect(text).toContain("test/model");
+			expect(text).not.toContain("test/kimi-k3");
+			expect(text).toContain("1 model hidden by models.blacklist");
+			expect(text).toContain("all matches excluded by blacklist");
+			expect(text).toContain("preferred model now: test/model");
+		} finally {
+			restore();
+		}
+	});
+
+	it("uses the role's models.suggested over the global fallback", async () => {
+		const restore = useAgentConfig({
+			models: { suggested: ["global-model"], blacklist: [] },
+			roles: { explorer: { description: "d", models: { suggested: ["role-model"] } } },
+		});
+		try {
+			const { tools } = extensionHarness();
+			const ctx = executionContext([
+				{ provider: "test", id: "role-model", name: "role model" },
+				{ provider: "test", id: "global-model", name: "global model" },
+			]);
+
+			const result = await tools.get("subagent_roles").execute("call", { role: "explorer" }, undefined, undefined, ctx);
+			const text = result.content[0].text;
+
+			expect(text).toContain("role-model → test/role-model");
+			expect(text).toContain("global-model → test/global-model");
+			expect(text.indexOf("role-model")).toBeLessThan(text.indexOf("global-model"));
+			expect(text).toContain("preferred model now: test/role-model");
+		} finally {
+			restore();
+		}
+	});
+
+	it("falls back to the global models.suggested when the role has none", async () => {
+		const restore = useAgentConfig({
+			models: { suggested: ["global-model"], blacklist: [] },
+			roles: { explorer: { description: "d" } },
+		});
+		try {
+			const { tools } = extensionHarness();
+			const ctx = executionContext({ provider: "test", id: "global-model", name: "global model" });
+
+			const result = await tools.get("subagent_roles").execute("call", {}, undefined, undefined, ctx);
+			expect(result.content[0].text).toContain("preferred model now: test/global-model");
+		} finally {
+			restore();
+		}
 	});
 });

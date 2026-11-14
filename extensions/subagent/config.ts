@@ -16,11 +16,29 @@ export interface ResourceGroup { concurrency: number }
 export interface RolePreference {
 	description?: string;
 	/** Ordered advice only; provider/modelId or bare modelId. */
-	suggestedModels?: string[];
+	models?: ModelSuggestions;
 	permissions?: Permissions;
 	systemPrompt?: string;
 	timeoutSec?: number;
 	resourceGroup?: string;
+}
+
+/** Ordered model advice. Empty/omitted = no constraint; the agent picks
+ *  freely from the session catalogue (still subject to models.blacklist). */
+export interface ModelSuggestions {
+	suggested?: string[];
+}
+
+/** Session-wide model selection policy. Lives at the top level of
+ *  subagent.json; role scope carries only the `suggested` half — the
+ *  blacklist is a global fence around the agent's autonomous choice, never
+ *  around human picks (e.g. the gated-goal reviewer picker). */
+export interface ModelPolicy {
+	/** Ordered advice; provider/modelId or bare modelId. */
+	suggested: string[];
+	/** Case-insensitive substring patterns matched against "provider/id" and
+	 *  the display name; any hit refuses agent dispatch of that model. */
+	blacklist: string[];
 }
 
 export type Permissions = "readonly" | "junior" | "full" | string[];
@@ -76,6 +94,7 @@ export interface SubagentConfig {
 	gatedGoal: GatedGoalConfig;
 	resourceGroups: Record<string, ResourceGroup>;
 	providerGroups: Record<string, string>;
+	models: ModelPolicy;
 	roles: Record<string, RolePreference>;
 }
 
@@ -93,6 +112,7 @@ const DEFAULT_CONFIG: SubagentConfig = {
 	},
 	resourceGroups: { default: { concurrency: 4 } },
 	providerGroups: {},
+	models: { suggested: [], blacklist: [] },
 	roles: {},
 };
 
@@ -100,15 +120,45 @@ const DEFAULT_CONFIG: SubagentConfig = {
  *  the file lives. Never hardcode it; `getAgentDir()` varies by install. */
 export function configPath(): string { return path.join(getAgentDir(), "subagent.json"); }
 
+/** Keep trimmed non-empty strings from an arbitrary config value. */
+function stringList(value: unknown): string[] {
+	return Array.isArray(value)
+		? value
+			.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+			.map((item) => item.trim())
+		: [];
+}
+
+/** True when one blacklist pattern blocks this model (case-insensitive
+ *  substring against "provider/id" and the display name). Empty patterns
+ *  never match. */
+export function isModelBlockedBy(pattern: string, model: { provider: string; id: string; name?: string }): boolean {
+	const p = pattern.trim().toLowerCase();
+	if (!p) return false;
+	const full = `${model.provider}/${model.id}`.toLowerCase();
+	if (full.includes(p)) return true;
+	return (model.name ?? "").toLowerCase().includes(p);
+}
+
+/** First blacklist pattern that blocks this model, if any. Single check
+ *  used by both the dispatch hard gate and the catalogue filtering. */
+export function blockedBy(cfg: SubagentConfig, model: { provider: string; id: string; name?: string }): string | undefined {
+	for (const pattern of cfg.models.blacklist) {
+		if (isModelBlockedBy(pattern, model)) return pattern;
+	}
+	return undefined;
+}
+
 export function normalize(raw: any): SubagentConfig {
 	const rawRoles = (raw?.roles ?? {}) as Record<string, any>;
 	const roles: Record<string, RolePreference> = {};
 	for (const [name, value] of Object.entries(rawRoles)) {
-		const suggestions = Array.isArray(value?.suggestedModels)
-			? value.suggestedModels.filter((item: unknown) => typeof item === "string" && item.trim()).map((item: string) => item.trim())
-			: [];
-		roles[name] = { ...value, suggestedModels: suggestions };
+		// Old configs carried suggestions flat as `suggestedModels`; the key is
+		// dropped unread — current shape is `models.suggested`.
+		const { suggestedModels: _legacy, ...rest } = value ?? {};
+		roles[name] = { ...rest, models: { suggested: stringList(value?.models?.suggested) } };
 	}
+	const rawModels = raw?.models ?? {};
 	const rawDefaults = { ...DEFAULT_CONFIG.defaults, ...(raw?.defaults ?? {}) };
 	const positiveInt = (value: unknown, fallback: number): number => {
 		if (typeof value === "boolean") return fallback; // Number(true) === 1 — reject it
@@ -128,6 +178,10 @@ export function normalize(raw: any): SubagentConfig {
 		},
 		resourceGroups: { ...DEFAULT_CONFIG.resourceGroups, ...(raw?.resourceGroups ?? {}) },
 		providerGroups: { ...(raw?.providerGroups ?? {}) },
+		models: {
+			suggested: stringList(rawModels.suggested),
+			blacklist: stringList(rawModels.blacklist),
+		},
 		roles,
 	};
 }
@@ -152,11 +206,12 @@ export function concurrencyForGroup(cfg: SubagentConfig, group: string): number 
 function starterConfig(): SubagentConfig {
 	return {
 		...DEFAULT_CONFIG,
+		models: { suggested: [], blacklist: [] },
 		roles: {
-			explorer: { description: "Reconnaissance of a codebase or external information sources (knowledge bases, the web, user-provided context), returning compressed findings for handoff to other agents", suggestedModels: [], permissions: "readonly", timeoutSec: 900 },
-			planner: { description: "Implementation planning from supplied context", suggestedModels: [], permissions: "readonly", timeoutSec: 900 },
-			advisor: { description: "Technical advisor: architecture design, complex problem-solving, code review, and technical decisions. Provides expert guidance for difficult issues and deep analysis.", suggestedModels: [], permissions: "readonly", timeoutSec: 600 },
-			worker: { description: "Small, well-scoped implementation work", suggestedModels: [], permissions: "junior", timeoutSec: 900 },
+			explorer: { description: "Reconnaissance of a codebase or external information sources (knowledge bases, the web, user-provided context), returning compressed findings for handoff to other agents", models: { suggested: [] }, permissions: "readonly", timeoutSec: 900 },
+			planner: { description: "Implementation planning from supplied context", models: { suggested: [] }, permissions: "readonly", timeoutSec: 900 },
+			advisor: { description: "Technical advisor: architecture design, complex problem-solving, code review, and technical decisions. Provides expert guidance for difficult issues and deep analysis.", models: { suggested: [] }, permissions: "readonly", timeoutSec: 600 },
+			worker: { description: "Small, well-scoped implementation work", models: { suggested: [] }, permissions: "junior", timeoutSec: 900 },
 		},
 	};
 }

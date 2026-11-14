@@ -1,6 +1,6 @@
 ---
 name: subagent
-description: "Delegate self-contained work to a subagent by default — exploration, planning, review, implementation, or multimodal reading — unless the task is solvable in a line or a single command. Dispatch is non-blocking, keeps the main context lean, and enables parallel work. Model choice: a role's suggestedModels are binding when present; permissions/timeout are main-agent-decided."
+description: "Delegate self-contained work to a subagent by default — exploration, planning, review, implementation, or multimodal reading — unless the task is solvable in a line or a single command. Dispatch is non-blocking, keeps the main context lean, and enables parallel work. Model choice: a role's models.suggested are binding when present; models.blacklist fences the agent's autonomous picks; permissions/timeout are main-agent-decided."
 ---
 
 # Subagent orchestration
@@ -20,13 +20,23 @@ must explicitly choose `model`, `permissions`, and `timeout` based on:
 4. user role suggestions from `subagent.json`;
 5. cost, speed, context size, concurrency, and reliability.
 
-Role `suggestedModels` are binding preferences: when dispatching a role that
-has suggestions, choose its model from that list, earlier entries preferred.
-Leave the list only when the user explicitly requested a specific model this
+Role `models.suggested` are binding preferences: when dispatching a role that
+has suggestions, choose its model from that list, earlier entries preferred;
+when it has none, the global `models.suggested` order is the fallback. Leave
+the suggestions only when the user explicitly requested a specific model this
 turn, or every suggestion is unavailable in the session catalogue or lacks a
-capability the task requires. Roles without suggestions, or role names with no
-preset at all, carry no model constraint. Never invent an unavailable model.
-Use `subagent_roles` when role preferences or current matches are needed.
+capability the task requires. Roles without suggestions carry no model
+constraint beyond the blacklist. Never invent an unavailable model. Use
+`subagent_roles` when role preferences or current matches are needed.
+
+**Blacklist fence.** `models.blacklist` in `subagent.json` lists
+substring patterns matched case-insensitively against `provider/id` and the
+display name (a pattern like `gpt` blocks `gpt-5.6-sol`, `gpt-6-astra`, and
+any model whose name contains it; a provider fragment blocks a whole
+provider). Blacklisted models are refused by `dispatch` and hidden from the
+`subagent_roles` catalogue and suggestion resolution. The fence binds the
+agent's autonomous choice only — explicit human picks (e.g. the gated-goal
+reviewer model picker) are never filtered.
 
 The session model registry (`models.json` plus any registered providers) is the
 source of truth for actual availability. `subagent.json` is the single
@@ -78,7 +88,12 @@ dispatch({
 
 `subagent.json` contains:
 
-- `roles.<name>.suggestedModels`: ordered bare model IDs or
+- `models.suggested`: global ordered model advice (fallback when a role has
+  none);
+- `models.blacklist`: patterns the agent may not dispatch as subagents
+  (case-insensitive substring on `provider/id` or display name; human picks
+  exempt);
+- `roles.<name>.models.suggested`: ordered bare model IDs or
   `provider/modelId` suggestions (binding for role dispatches);
 - role descriptions and advisory permission/timeout preferences;
 - `resourceGroups` concurrency limits;
@@ -94,7 +109,7 @@ Roles (`explorer`, `planner`, `advisor`, `worker`) live entirely in
 `subagent.json` — each carries its own description, model hints,
 permissions, timeout, and optional systemPrompt. No bundled prompt files.
 A role's permission/timeout preferences and systemPrompt are advisory; its
-suggestedModels are binding - the main agent picks from them when present.
+models.suggested are binding - the main agent picks from them when present.
 The main agent's explicit dispatch parameters (permissions/timeout/systemPrompt)
 always win.
 
