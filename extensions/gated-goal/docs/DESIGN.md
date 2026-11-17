@@ -123,7 +123,26 @@ hardcoded, since it differs between a stock install and a bundled one.
 `load()` merges persisted state over a safe `EMPTY` default so missing fields
 never crash. `save()` writes atomically enough for this use (single writer).
 Exiting sets `phase: "idle"` and records `exitReason` rather than deleting the
-file, so the last run stays inspectable.
+file, so the last run stays inspectable. `exitReason` is terminal: `reload()`
+collapses any live phase found next to it back to idle (self-heal for state
+files written by the pre-epoch bug described below).
+
+### Epoch latch (exit vs in-flight review)
+
+A review cycle is fire-and-forget: `runReviewCycle` spawns the reviewer and
+its continuation acts on the result when `await runReview` resolves — which
+can be minutes later. Every authoritative transition bumps `gateEpoch`:
+`exitGate`, start-over in `/gated-goal`, and `reload()` (session switch). A
+cycle captures the epoch at spawn and re-checks it after the await; a
+mismatch means the result belongs to a gate that no longer exists, and the
+continuation discards it — no phase write, no follow-up message. Without the
+latch, a reviewer that crashed *after* the user exited would write
+`phase: "act"` back over idle and inject "Back to ACT" into an exited
+session, resurrecting the loop (observed in the wild as `phase: act` +
+`exitReason` set in the same state file; regression-tested in
+`test/gated-goal-exit.test.ts`). `exitGate` and start-over additionally kill
+the in-flight reviewer child (`cancelActiveReviewer`) so an abandoned review
+does not run to its timeout in the background.
 
 ## Commands
 
@@ -225,6 +244,9 @@ to VERIFY.
 - is added to the registry → appears in `/subagents` with role `"reviewer"`
 - emits `wait:active` on registry add, `wait:done` in a `finally` → the todo
   extension's nudge stays silent while a review runs
+- is cancellable: `cancelActiveReviewer()` (same mechanics as
+  `dispatch_cancel`) kills the in-flight child; `exitGate` and `/gated-goal`
+  start-over call it so a dead gate does not keep a doomed review running
 - spawns with `PI_SUBAGENT_CHILD=1` (set by `runChild`) → **cannot dispatch**
 - uses `reviewerPermissions` = read/grep/find/ls/bash
 - runs with `--no-context-files` (`contextFiles: false` → `runChild`), so the

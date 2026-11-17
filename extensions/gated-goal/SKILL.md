@@ -87,7 +87,9 @@ gate, so editing the plan cannot be used to abort the workflow.
 
 ## Aborting
 
-`/gated-goal-exit` aborts manually.
+`/gated-goal-exit` aborts manually: the gate flips to idle immediately, the
+in-flight reviewer is killed, and any reviewer result that arrives after the
+exit is discarded — the loop cannot resurrect itself after an abort.
 
 ## Notes
 

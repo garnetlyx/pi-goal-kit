@@ -160,6 +160,27 @@ export interface ReviewResult {
 }
 
 /**
+ * The reviewer child currently in flight, if any. Exposed so the gate can kill
+ * a doomed review on exit instead of letting it run to its timeout in the
+ * background — a late-arriving result after exit must not wake the loop.
+ */
+let activeEntry: DispatchEntry | undefined;
+
+/** Kill the in-flight reviewer (same mechanics as dispatch_cancel). The
+ *  wait:done emission stays in runReview's finally, so nothing double-fires.
+ *  Returns whether a live reviewer was actually cancelled. */
+export function cancelActiveReviewer(): boolean {
+	const e = activeEntry;
+	if (!e || (e.status !== "queued" && e.status !== "running" && e.status !== "hung")) return false;
+	e.status = "cancelled";
+	e.endedAt = Date.now();
+	try { e.abort?.(); } catch { /* ignore */ }
+	try { e.kill?.(); } catch { /* ignore */ }
+	registry.changed();
+	return true;
+}
+
+/**
  * Run one full review. Spawns a reviewer subagent with the frozen prompt.
  * Resolves when the child exits. Caller decides transitions based on `done`.
  * The window comes from user config (`gatedGoal.reviewTimeoutSec` in subagent.json),
@@ -172,6 +193,7 @@ export async function runReview(pi: ExtensionAPI, ctx: ExtensionContext, state: 
 	const name = `reviewer-${reviewNumber}`;
 	const entry = buildReviewerEntry({ name, model: state.reviewerModel, task: `Review #${reviewNumber} against frozen plan`, group: "default" });
 	registry.add(entry);
+	activeEntry = entry;
 	pi.events.emit("wait:active", { source: "subagent", id: entry.id });
 
 	const systemPrompt = buildReviewerSystemPrompt(prompt, { timeoutSec: reviewTimeoutSec, nowMs: Date.now() });
@@ -188,6 +210,7 @@ export async function runReview(pi: ExtensionAPI, ctx: ExtensionContext, state: 
 		});
 	} finally {
 		pi.events.emit("wait:done", { source: "subagent", id: entry.id });
+		if (activeEntry === entry) activeEntry = undefined;
 	}
 
 	const output = entry.finalOutput ?? entry.errorMessage ?? "(no output)";

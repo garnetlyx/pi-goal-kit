@@ -47,7 +47,7 @@ import {
 	REVIEWER_PERMISSIONS,
 	save,
 } from "./state.ts";
-import { pingReviewer, runReview } from "./reviewer.ts";
+import { pingReviewer, runReview, cancelActiveReviewer } from "./reviewer.ts";
 import { availableModels } from "../subagent/models.ts";
 import { pickModel } from "../subagent/model-picker.ts";
 import {
@@ -93,9 +93,29 @@ export default function (pi: ExtensionAPI) {
 	let state: GatedGoalState = { phase: "idle", maxIteration: DEFAULT_MAX_ITERATION, reviewsCompleted: 0, reviewerModel: "", reviewerPermissions: REVIEWER_PERMISSIONS, frozenPrompt: "", frozenHash: "", startedAt: 0, originalCwd: "" };
 	let ready = false;
 
+	// Epoch latch for async continuations. Every authoritative transition (exit,
+	// new gate, session switch) bumps it; a review cycle captures the value at
+	// spawn and re-checks it after `await runReview` resolves. A mismatch means
+	// the result belongs to a gate that no longer exists — the continuation must
+	// then discard the result entirely: no state writes, no follow-up messages.
+	// Without this, a reviewer that crashes AFTER the user exits would write
+	// phase=act back over idle and inject "Back to ACT" into an exited session,
+	// resurrecting the gate (seen in the wild as phase=act + exitReason set).
+	let gateEpoch = 0;
+
 	const reload = (ctx: ExtensionContext) => {
+		// A session switch can leave a review from the previous session in
+		// flight; its continuation must not write into the newly loaded state.
+		gateEpoch++;
 		state = load(ctx);
 		ready = true;
+		// Heal state files written by the pre-epoch bug: exitReason is terminal,
+		// so a non-idle phase next to it can only be a stale continuation's
+		// write after exit. Collapse to idle instead of resurrecting the loop.
+		if (state.exitReason && state.phase !== "idle") {
+			state.phase = "idle";
+			save(ctx, state);
+		}
 		// Detect project path change since the run was created (project moved /
 		// renamed / mounted elsewhere). Warn so the agent does not silently rely
 		// on stale-path assumptions.
@@ -134,6 +154,11 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function exitGate(ctx: ExtensionContext, reason: string): void {
+		// Invalidate in-flight review continuations FIRST: their late results
+		// must not resurrect the gate after exit. Also kill the reviewer child —
+		// a review nobody will read must not run to its timeout in background.
+		gateEpoch++;
+		cancelActiveReviewer();
 		state.phase = "idle";
 		state.exitReason = reason;
 		save(ctx, state);
@@ -150,6 +175,11 @@ export default function (pi: ExtensionAPI) {
 
 	// ---- P4 review cycle (fire-and-forget from agent_settled) ----
 	function runReviewCycle(ctx: ExtensionContext): void {
+		// A fresh cycle invalidates any predecessor still in flight (belt and
+		// braces: only one cycle can run per gate, but the epoch check below
+		// makes a stray predecessor harmless even if that invariant breaks).
+		gateEpoch++;
+		const myEpoch = gateEpoch;
 		state.phase = "review";
 		save(ctx, state);
 		setStatus(ctx, "reviewing");
@@ -160,12 +190,20 @@ export default function (pi: ExtensionAPI) {
 			try {
 				result = await runReview(pi, ctx, state, reviewNumber);
 			} catch (err: any) {
+				// Gate exited / new gate / session switch while the reviewer ran:
+				// this continuation no longer owns the state. Discard silently.
+				if (gateEpoch !== myEpoch) return;
 				ctx.ui.notify(`reviewer crashed: ${err?.message ?? err}`, "error");
 				state.phase = "act";
 				save(ctx, state);
 				setStatus(ctx);
 				return;
 			}
+
+			// Stale continuation (exit / restart / newer cycle took over): the
+			// result — verdict or crash — belongs to a dead gate. No phase write,
+			// no sendUserMessage, or the gate resurrects itself after exit.
+			if (gateEpoch !== myEpoch) return;
 
 			if (result.done) {
 				// Do NOT exit yet. Hand control to the main agent for an independent
@@ -265,6 +303,11 @@ export default function (pi: ExtensionAPI) {
 			if (state.phase !== "idle") {
 				const stop = await ctx.ui.confirm("Gated-goal already active", `Phase: ${state.phase}. Abort and start over?`);
 				if (!stop) return;
+				// The old gate is being torn down by user decision: any review
+				// still in flight is abandoned here, before the ping, so its
+				// continuation can never leak into the new gate.
+				gateEpoch++;
+				cancelActiveReviewer();
 			}
 
 			// Parse args: optional numeric maxIteration, optional model string.
