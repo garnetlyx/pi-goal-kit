@@ -533,10 +533,10 @@ const INFO = {
     bullets:['Entered by <code>/gated-goal [maxIteration] [reviewerModel]</code>.',
              'Args are order-tolerant: the first all-numeric token becomes <code>maxIteration</code> (clamped ≥ 1, default 10); the rest joins into the reviewer model string.',
              'Exiting never deletes the state file — the last run stays inspectable.'] },
-  p1: { tag:'P1', chip:'phase: (pre-state)', sub:'Resolve the reviewer model, then prove it answers before anything is written to disk.',
+  p1: { tag:'P1', chip:'phase: (pre-state)', sub:'Resolve the reviewer model, then prove it answers before entering PLAN.',
     bullets:['Model resolution: explicit arg → <code>ctx.ui.select</code> picker (120s) → main agent’s current model.',
              '<code>pingReviewer</code> sends “reply with exactly: ok” with the configured ping budget (<code>gatedGoal.pingTimeoutSec</code> in subagent.json, default 45s) and a minimal read-only prompt.',
-             'Child status ≠ <code>done</code>, or output lacking “ok”, throws → error notify, abort, <b>no state saved</b>.',
+             'Child status ≠ <code>done</code>, or output lacking “ok”, throws → error notify, abort to idle · <b>nothing left active</b>.',
              'Cold local models needing more than the configured window to first token will falsely fail here.'] },
   plan: { tag:'P2', chip:'phase: plan', sub:'Agent and user align on the goal, then the plan is frozen — hashed, persisted, and mirrored into the todo list.',
     bullets:['<code>freeze_plan(outcome, verification, constraints, quality, todos)</code> is the only exit.',
@@ -571,8 +571,8 @@ const INFO = {
              '<code>maxIteration = N</code> permits up to N reviews, each of which can reach VERIFY.'] },
   aborted: { tag:'exit', chip:'exitReason: aborted by user', sub:'<code>/gated-goal-exit</code> from any active phase.',
     bullets:['Exits with reason “aborted by user”.','Phase resets to idle; the state file is kept for inspection.'] },
-  abortping: { tag:'abort', chip:'phase: idle', sub:'The connectivity probe failed before any state existed. Nothing is written — this is not an exitReason, just a refusal to start.',
-    bullets:['Any throw from <code>pingReviewer</code> bubbles to the command handler.','Shows an error notify and returns to idle with no state file change.'] }
+  abortping: { tag:'abort', chip:'phase: idle', sub:'The replacement or initial reviewer did not pass its probe. No new run starts.',
+    bullets:['Any throw from <code>pingReviewer</code> bubbles to the command handler.','Shows an error. If a previous run was aborted at confirmation, its idle state and exit reason remain on disk.'] }
 };
 
 /* ═══ runtime state ════════════════════════════════════ */
@@ -598,11 +598,11 @@ const E = {
 
   ping_ok: { label:'ping → "ok"', note:'reviewer answered in time', tone:'go', from:['p1'],
     run(){ S.phase='plan'; S.reviewerPermissions = PERMS; S.originalCwd = CWD;
-      return { edge:'e-ping-ok', node:'plan', tone:'go', msg:'ping ok → <b>P2 PLAN</b> · state file created' }; } },
+      return { edge:'e-ping-ok', node:'plan', tone:'go', msg:'ping ok → <b>P2 PLAN</b> · plan state saved' }; } },
 
   ping_fail: { label:'ping timeout', note:'ping window elapsed / no "ok"', tone:'bad', from:['p1'],
     run(){ S = EMPTY(); S.maxIteration = maxPref;
-      return { edge:'e-ping-fail', node:'abortping', tone:'bad', msg:'ping failed → abort · <b>no state saved</b>' }; } },
+      return { edge:'e-ping-fail', node:'abortping', tone:'bad', msg:'ping failed → abort · <b>nothing left active</b>' }; } },
 
   freeze_plan: { label:'freeze_plan()', note:'4 sections + todos', tone:'go', from:['plan'],
     run(){ S.phase='act'; S.frozenPrompt='## Outcome …\\n## Verification …\\n## Constraints …\\n## Code Quality Requirements …';

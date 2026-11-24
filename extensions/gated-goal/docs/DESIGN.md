@@ -27,7 +27,7 @@ move together.
 ```
 idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │ ping "reply ok" (config: pingTimeoutSec)
-                                   ├─ fail ─► abort to idle (no state saved)
+                                   ├─ fail ─► abort to idle (nothing left active)
                                    ▼
                                  P2 plan
                                    │ agent + user align on goal
@@ -132,23 +132,44 @@ files written by the pre-epoch bug described below).
 A review cycle is fire-and-forget: `runReviewCycle` spawns the reviewer and
 its continuation acts on the result when `await runReview` resolves — which
 can be minutes later. Every authoritative transition bumps `gateEpoch`:
-`exitGate`, start-over in `/gated-goal`, and `reload()` (session switch). A
-cycle captures the epoch at spawn and re-checks it after the await; a
-mismatch means the result belongs to a gate that no longer exists, and the
-continuation discards it — no phase write, no follow-up message. Without the
-latch, a reviewer that crashed *after* the user exited would write
-`phase: "act"` back over idle and inject "Back to ACT" into an exited
-session, resurrecting the loop (observed in the wild as `phase: act` +
-`exitReason` set in the same state file; regression-tested in
-`test/gated-goal-exit.test.ts`). `exitGate` and start-over additionally kill
-the in-flight reviewer child (`cancelActiveReviewer`) so an abandoned review
-does not run to its timeout in the background.
+`teardownGate` (the one teardown path, shared by `exitGate` and the start-over
+branch of `/gated-goal`) and `reload()` (session switch). A cycle captures the
+epoch at spawn and re-checks it after the await; a mismatch means the result
+belongs to a gate that no longer exists, and the continuation discards it — no
+phase write, no follow-up message. Without the latch, a reviewer that crashed
+*after* the user exited would write `phase: "act"` back over idle and inject
+"Back to ACT" into an exited session, resurrecting the loop (observed in the
+wild as `phase: act` + `exitReason` set in the same state file;
+regression-tested in `test/gated-goal-exit.test.ts`). `teardownGate` also
+kills the in-flight reviewer child (`cancelActiveReviewer`) so an abandoned
+review does not run to its timeout in the background, and persists
+`phase: "idle"` at once — a start-over whose ping then fails (or pi crashes
+mid-ping) cannot come back as a live gate.
+
+A start-over tears the old gate down the moment the user confirms "Abort and
+start over?", not once the replacement reviewer has passed its ping: the abort
+is what was confirmed, and a gate whose reviewer is already killed and whose
+continuation is discarded must not linger in `review` with nothing left that
+can move it. If the old gate already finished while the confirmation was open,
+its terminal reason is preserved until a new run starts. Start-over skips only the exit announcement — success supersedes it
+immediately, and the extra follow-up would cost an agent turn.
+
+### Restart recovery
+
+A state file found in `review` on `session_start` belongs to a process that is
+gone (pi restarted): the reviewer's continuation died with it, so no verdict
+can ever land here and nothing was charged (see
+[Iteration accounting](#iteration-accounting)). The handler flips to `act`,
+persists, and sends a follow-up naming the lost review (`reviewsCompleted + 1`)
+so the agent re-presents completion; todo's next `review` disposition then
+starts a fresh cycle. It deliberately does not re-spawn the reviewer itself —
+opening a session must not launch a review process on its own.
 
 ## Commands
 
 | Command | Effect |
 |---------|--------|
-| `/gated-goal [maxIteration] [reviewerModel]` | Start. If already active, asks to abort+restart. Resolves reviewer model (arg → searchable picker → esc=main), pings it, enters P2. |
+| `/gated-goal [maxIteration] [reviewerModel]` | Start. If already active, asks to abort+restart; confirming tears the old gate down at once (persisted idle, reviewer killed), so a failed ping leaves nothing active. Resolves reviewer model (arg → searchable picker → esc=main), pings it, enters P2. |
 | `/gated-goal-exit` | Manual abort. Exits with reason "aborted by user". |
 | `/gated-goal-status` | Notify current phase / iteration / reviewer. |
 
@@ -186,7 +207,9 @@ adds a throwaway registry entry (so it shows in
 - final output lacks `ok` (case-insensitive) → throw "returned no 'ok'"
 
 Any throw bubbles to the command handler, which shows an error notify and
-aborts without writing state. Cold local models that need more than the
+aborts. A fresh start has written nothing; a start-over has already torn the
+previous gate down at confirm time (see [Epoch latch](#epoch-latch-exit-vs-in-flight-review)),
+so either way no gate is left active. Cold local models that need more than the
 configured window to first token will falsely fail — raise
 `gatedGoal.pingTimeoutSec` in `subagent.json` if that bites you.
 
@@ -235,6 +258,14 @@ the cap: if the charged iteration was the last one, `reject_done` exits with
 "max iteration reached" instead of returning to ACT. This is the only place the
 cap can end an approved review, because P4 always lets a DONE verdict through
 to VERIFY.
+
+### VERIFY anti-stall
+
+Neither tool flipped the phase and the agent still settled → it ended its turn
+without deciding. `agent_settled` while `phase === "verify"` sends a follow-up
+demanding an explicit `confirm_done` or `reject_done`: without a manual abort
+or restart, only these decisions move the gate out of VERIFY, so a model that merely reports its verification result and
+stops would park the loop there for good.
 
 ## Reviewer (`reviewer.ts`)
 

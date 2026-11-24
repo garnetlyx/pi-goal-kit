@@ -16,6 +16,9 @@ with `/gated-goal`.
 - `reviewerModel` — `provider/modelId`. If omitted, a searchable model picker
   opens (type to filter, ↑↓/jk move, pgup/pgdn/home/end jump); esc defaults to
   the main agent's current model.
+- Already active? Confirming "Abort and start over" tears the old gate down
+  immediately — even if the new reviewer's ping then fails, nothing stays
+  active.
 
 ## Phases
 
@@ -76,7 +79,9 @@ actually checking. Then:
   run (**max iteration reached**).
 
 This is the final gate. The reviewer's promise is necessary but not
-sufficient — your own verification is what closes the loop.
+sufficient — your own verification is what closes the loop. If you stop
+without calling either tool, you are nudged to decide; the nudge itself does
+not advance the gate.
 
 ## Integrity
 
@@ -90,6 +95,12 @@ gate, so editing the plan cannot be used to abort the workflow.
 `/gated-goal-exit` aborts manually: the gate flips to idle immediately, the
 in-flight reviewer is killed, and any reviewer result that arrives after the
 exit is discarded — the loop cannot resurrect itself after an abort.
+
+## Restart
+
+If Pi restarts mid-review, that review's verdict never landed: it is **not
+charged**, you are flipped back to ACT and told so. Re-present your completion
+summary and stop — a fresh review runs automatically.
 
 ## Notes
 

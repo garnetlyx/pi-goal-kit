@@ -5,7 +5,8 @@
  *   /gated-goal [maxIteration] [reviewerModel]
  *
  * P1 select-reviewer — pick a reviewer model (arg, or searchable model
- *   picker, or esc = main model), then ping it with "reply ok". Failure → abort.
+ *   picker, or esc = main model), then ping it with "reply ok". Failure → abort
+ *   (a start-over has already torn the previous gate down at confirm time).
  * P2 plan            — discuss with user; agent calls freeze_plan with the four
  *   sections + todos. Frozen prompt + hash persisted; the todo list is replaced
  *   wholesale with the frozen items (todo:replace event); → P3.
@@ -129,19 +130,21 @@ export default function (pi: ExtensionAPI) {
 
 	// ---- Self-heal: recover from a review interrupted by restart/crash ----
 	//
-	// If we come back up while phase === "review", the previous reviewer child
-	// was killed mid-run (e.g. a pi restart or /reload). The reviewsCompleted
-	// counter was already bumped, so we must NOT silently re-enter review
-	// (that would double-count). Flip back to act so todo's next settled
-	// disposition can re-trigger a fresh review. Also nudge the agent so
-	// it knows the last review was lost and it should re-present completion.
+	// If we come back up while phase === "review", the pi process that owned the
+	// reviewer's continuation is gone (restart), so no verdict can ever land
+	// here and the iteration was not charged — charging happens on a verdict,
+	// in runReviewCycle. We do not re-spawn the reviewer here: opening a
+	// session must not launch a review process by itself. Flip back to act so
+	// todo's next settled disposition re-triggers a fresh cycle, and nudge the
+	// agent so it knows the last review was lost and it should re-present
+	// completion.
 	pi.on("session_start", async (_e, ctx) => {
 		if (state.phase === "review") {
 			state.phase = "act";
 			save(ctx, state);
 			setStatus(ctx, "recovering");
 			pi.sendUserMessage(
-				`⚠️ The previous review cycle (iteration ${state.reviewsCompleted}/${state.maxIteration}) was interrupted by a restart and its feedback was lost. Flipping back to ACT. If all work is complete, present your completion summary and stop — a fresh review will run automatically.`,
+				`⚠️ Review ${state.reviewsCompleted + 1}/${state.maxIteration} was interrupted by a restart before it returned a verdict — its feedback is lost and no iteration was charged. Back in ACT. If all work is complete, present your completion summary and stop — a fresh review will run automatically.`,
 				{ deliverAs: "followUp" },
 			);
 		}
@@ -153,7 +156,11 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setStatus?.("gated-goal", (phase + (extra ? " " + extra : "")).trim());
 	}
 
-	function exitGate(ctx: ExtensionContext, reason: string): void {
+	/** Kill the gate: sever in-flight review continuations, kill the reviewer
+	 *  child, persist idle. The one teardown path, shared by `/gated-goal-exit`,
+	 *  confirm_done, the budget exits, and the start-over branch of
+	 *  `/gated-goal` (which skips the announcement `exitGate` adds on top). */
+	function teardownGate(ctx: ExtensionContext, reason: string): void {
 		// Invalidate in-flight review continuations FIRST: their late results
 		// must not resurrect the gate after exit. Also kill the reviewer child —
 		// a review nobody will read must not run to its timeout in background.
@@ -163,6 +170,10 @@ export default function (pi: ExtensionAPI) {
 		state.exitReason = reason;
 		save(ctx, state);
 		setStatus(ctx);
+	}
+
+	function exitGate(ctx: ExtensionContext, reason: string): void {
+		teardownGate(ctx, reason);
 		// confirm_done passes "done — <note>", so match the prefix, not equality.
 		const succeeded = reason === "done" || reason.startsWith("done —");
 		ctx.ui.notify(`gated-goal exited: ${reason}`, succeeded ? "info" : "warning");
@@ -300,14 +311,17 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("gated-goal", {
 		description: "Start gated-goal mode: /gated-goal [maxIteration] [reviewerModel]. Phases: select reviewer → plan → act → review loop.",
 		handler: async (args, ctx) => {
+			let abortedPhase: GatedGoalState["phase"] | undefined;
 			if (state.phase !== "idle") {
+				const promptedGate = state;
 				const stop = await ctx.ui.confirm("Gated-goal already active", `Phase: ${state.phase}. Abort and start over?`);
-				if (!stop) return;
-				// The old gate is being torn down by user decision: any review
-				// still in flight is abandoned here, before the ping, so its
-				// continuation can never leak into the new gate.
-				gateEpoch++;
-				cancelActiveReviewer();
+				if (!stop || state !== promptedGate) return;
+				// A verdict can land while the dialog is open. Keep a terminal
+				// result; tear down only a still-active gate, before the probe.
+				if (promptedGate.phase !== "idle") {
+					abortedPhase = promptedGate.phase;
+					teardownGate(ctx, "aborted by user");
+				}
 			}
 
 			// Parse args: optional numeric maxIteration, optional model string.
@@ -348,7 +362,11 @@ export default function (pi: ExtensionAPI) {
 			try {
 				await pingReviewer(pi, ctx, reviewerModel);
 			} catch (err: any) {
-				ctx.ui.notify(`Reviewer connectivity failed: ${err?.message ?? err}. Gated-goal aborted.`, "error");
+				ctx.ui.notify(
+					`Reviewer connectivity failed: ${err?.message ?? err}. Gated-goal aborted.` +
+						(abortedPhase ? ` The previous run (phase ${abortedPhase}) was aborted as you confirmed; no gate is active.` : ""),
+					"error",
+				);
 				return;
 			}
 
