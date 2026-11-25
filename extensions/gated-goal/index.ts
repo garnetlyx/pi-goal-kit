@@ -16,7 +16,8 @@
  *   the todo list is replaced wholesale with the frozen items (todo:replace
  *   event); → P3.
  * P3 act             — todo owns the agent_settled decision: a fresh incomplete
- *   list gets one continuation nudge, an active external wait stays in P3, and
+ *   list gets one continuation nudge, an active external wait stays in P3
+ *   (outranking a finished list), and
  *   every settle with no scheduled continuation enters P4.
  * P4 review          — spawn reviewer with the immutable frozen prompt. Parse
  *   <promise>DONE</promise>:

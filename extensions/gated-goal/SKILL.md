@@ -65,7 +65,8 @@ Work the todos (they are already there — freeze_plan created them). The frozen
 plan must contain at least one todo before ACT can begin. When you stop, the
 todo extension alone decides what follows:
 - a fresh incomplete list gets one continuation nudge (stay in P3)
-- an active external wait stays in P3 without a nudge
+- an active external wait stays in P3 without a nudge — including with every
+  todo already done (a run that still waits on something is not finished)
 - if no continuation is scheduled — including an empty list, an all-done list,
   or an unchanged incomplete list that was already nudged — review starts (→ P4)
 

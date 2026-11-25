@@ -206,15 +206,21 @@ export default function (pi: ExtensionAPI) {
 		const settle = (disposition: TodoSettledEvent["disposition"]) => {
 			pi.events.emit(TODO_SETTLED_EVENT, { disposition, ctx } satisfies TodoSettledEvent);
 		};
+		// An active external wait outranks a finished list: a completion that is
+		// still waiting on a subagent or a reminder is not a completion yet, so
+		// the workflow must stay where it is instead of starting its review.
+		// Waits converge (subagent and reminder-hook both emit wait:done when
+		// they end, which delivers a follow-up and settles again), so this cannot
+		// park a workflow permanently.
+		if (activeWaits.size > 0) {
+			settle("wait");
+			return; // legitimately waiting — stay silent
+		}
 		const incomplete = todos.filter(isIncomplete);
 		if (incomplete.length === 0) {
 			lastNudgeSignature = "";
 			settle("review");
 			return;
-		}
-		if (activeWaits.size > 0) {
-			settle("wait");
-			return; // legitimately waiting — stay silent
 		}
 		// Avoid nudge loops: if the set of incomplete ids hasn't changed since the
 		// last nudge, the agent already saw it and chose to stop. Don't spam.

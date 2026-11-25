@@ -59,7 +59,10 @@ you to mark work you already completed. Respond by toggling anything that is
 actually done, then continuing the rest.
 
 The nudge stays silent while a subagent or reminder is in flight so it does
-not interrupt legitimate waits. The de-dup signature prevents repeat nudges
+not interrupt legitimate waits — and that applies to a *finished* list too: a
+completed run with something still pending reports `wait`, not `review`, so a
+workflow that reviews on completion (gated-goal) waits for the pending thing
+instead of reviewing an unfinished run. The de-dup signature prevents repeat nudges
 when nothing has changed since the last one. After each settle, todo publishes
 its shared disposition for workflow extensions: `continue` when it sent a
 nudge, `wait` while external work is active, or `review` when it scheduled no

@@ -13,11 +13,11 @@ local-model failure of stopping mid-work or forgetting to mark work done.
 agent uses todo tool → state stored in tool-result details
                     → widget below editor refreshes (non-empty only)
 
-agent_settled fires:
-  incomplete = todos where status != "done"
+agent_settled fires (order matters: a wait outranks a finished list)
   if activeWaits.size > 0:
-     → emit todo:settled { disposition: "wait" }
-  else if incomplete set is fresh:
+     → emit todo:settled { disposition: "wait" }        # nothing else, even with every todo done
+  incomplete = todos where status != "done"
+  if incomplete set is fresh:
      → pi.sendUserMessage(nudge, { deliverAs: "followUp" })
      → emit todo:settled { disposition: "continue" }
   else:
@@ -127,8 +127,8 @@ After deciding, todo emits the shared `todo:settled` event exported by
 | Disposition | Condition |
 |-------------|-----------|
 | `continue` | a fresh incomplete-list nudge was sent |
-| `wait` | `activeWaits.size > 0` |
-| `review` | no continuation was scheduled: empty/all-done, or an unchanged incomplete list already nudged |
+| `wait` | `activeWaits.size > 0`, whatever the list looks like — a finished list that is still waiting on a subagent or a reminder is not a finished run |
+| `review` | no continuation was scheduled and nothing is being waited on: empty/all-done, or an unchanged incomplete list already nudged |
 
 Workflow extensions consume this event instead of independently reading todo
 state or reproducing the nudge and wait rules. This makes todo the single owner
@@ -146,7 +146,14 @@ wait:done    { source: string, id: string }
 
 `source` identifies the originating extension (`"subagent"`, `"reminder-hook"`,
 or any future one). The extension maintains `activeWaits: Set<"${source}:${id}">`
-and treats `size > 0` as "something is being waited on — do not nudge".
+and treats `size > 0` as "something is being waited on — do not nudge, and do
+not report the run finished". Workflow extensions that start a review on
+`review` therefore stay in the acting phase while a wait is open.
+
+This cannot park a workflow: every wait ends and announces it — a subagent
+emits `wait:done` in its exit path and delivers its result as a follow-up, a
+reminder fires, is cancelled or times out — and that follow-up produces the
+next settled turn, which then reports `review`.
 
 Any extension that represents a wait should emit these:
 
@@ -171,3 +178,9 @@ todo picks it up with no code change.
   removes a todo with no net id change, the signature is unchanged.
 - Widget does not accept keyboard input; it is display-only. Editing is via
   the `todo` tool only.
+- A wait that never ends blocks `review` for exactly as long as it lasts. That
+  is the intent — a run waiting on something is not finished — and it is
+  visible and reversible (cancel the reminder, cancel the subagent, or exit the
+  workflow), so no watchdog is imposed on top. The one unbounded case is a
+  reminder armed with a condition and no `timeout_minutes`: its predicate may
+  never become true, and it then holds `wait` indefinitely.

@@ -75,6 +75,8 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │ agent works the todos   │
                                    │ todo owns settled state:│
                                    │  nudge/wait → stay P3   │
+                                   │  (a wait outranks a     │
+                                   │   finished list)        │
                                    │  no continuation → P4   │
                                    ▼                         │
                                  P4 review                   │
