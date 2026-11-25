@@ -49,7 +49,7 @@ and triggers a new turn only when the agent is idle. It never interrupts.
 - `at` — `"9:30"`, `"09:30:00"`, ISO datetime; time gate
 - `in_minutes` — countdown gate
 - `poll_seconds` — poll interval (default 30)
-- `timeout_minutes` — hard cap; fires flagged as timeout
+- `timeout_minutes` — hard cap, default 120 minutes; fires flagged as timeout
 - `label` — display label
 
 Semantics:
@@ -70,6 +70,13 @@ Reminders are stored per session under
 `session_start` the extension clears any legacy persistent reminder widget and
 re-arms every pending reminder. Pure-time reminders already due fire
 immediately on the next start. Timers are cleaned up on `session_shutdown`.
+
+Every reminder carries a hard cap (120 minutes by default, overridable per call).
+Without one, a predicate that never becomes true waits forever — and because
+reminders persist and re-arm on `session_start`, that leak outlives the session
+that created it. Expiry is a wake-up, not a failure: the agent receives its own
+message flagged TIMEOUT and re-arms or pivots. A non-positive or non-finite
+`timeout_minutes` also falls back to the default rather than removing the cap.
 
 Two details of re-arming matter:
 

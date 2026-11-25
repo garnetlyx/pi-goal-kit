@@ -28,7 +28,8 @@ Parameters:
 - `at` *(optional)* — `"9:30"`, `"09:30:00"`, or ISO datetime. Time gate.
 - `in_minutes` *(optional)* — countdown gate in minutes.
 - `poll_seconds` *(optional)* — poll interval (default 30; use larger for long waits).
-- `timeout_minutes` *(optional)* — hard cap; fires flagged as timeout so you can bail.
+- `timeout_minutes` *(optional, default 120)* — hard cap; fires flagged as timeout
+  so you can bail or re-arm. No reminder waits forever.
 - `label` *(optional)* — display label.
 
 Semantics:
@@ -139,5 +140,6 @@ set_reminder { in_minutes: 5, message: "Re-check the task status now." }
   completion signal when at all possible.
 - For long waits (market open, CI), raise `poll_seconds` (e.g. 60–300) to
   avoid noise.
-- Set `timeout_minutes` whenever a stale wait should bail rather than hang
-  forever; on timeout you get the message flagged so you can re-arm or pivot.
+- Every reminder has a cap (120 minutes unless you set one); on timeout you get
+  the message flagged so you can re-arm or pivot. Set a shorter one when a
+  stale wait should bail early.
