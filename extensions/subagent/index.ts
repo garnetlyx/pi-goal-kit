@@ -7,6 +7,10 @@
  * dispatch_status — list live/recent dispatches.
  * dispatch_cancel — cancel one by id.
  * /subagents      — open the TUI panel (list + selected output, ↑↓ a esc/q).
+ * /subagent       — user-picked model + prompt: the model argument completes
+ *                   from the session catalogue, the pick grants a one-time
+ *                   blacklist override for exactly that model, and the agent
+ *                   dispatches it.
  *
  * Non-blocking: dispatch returns an id immediately. When the child finishes,
  * the resume text is injected into the current session via
@@ -18,7 +22,8 @@
  * dispatch: blacklisted models (case-insensitive substring on provider/id or
  * display name) are refused by the dispatch tool and hidden from the
  * subagent_roles catalogue. Human model picks (e.g. the gated-goal reviewer
- * picker) are never filtered.
+ * picker) are never filtered; a /subagent pick is exempt for that one
+ * dispatch through a one-time override bound to the picked model.
  * The main agent still explicitly chooses permissions/timeout.
  *
  * Concurrency: resource groups (defined in subagent.json) share
@@ -58,6 +63,8 @@ import {
 } from "./scheduler.ts";
 import { describePermissions, runChild } from "./runner.ts";
 import { openSubagentsPanel } from "./panel.ts";
+import { registerSubagentCommand, setModelRegistry } from "./command.ts";
+import { takeModelOverride } from "./override.ts";
 
 /**
  * pi >= 1.5 throws "Cannot submit a prompt while compaction is in progress"
@@ -175,6 +182,9 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		ensureConfigTemplate(ctx);
 		const cfg = loadConfig(ctx);
+		// The /subagent completion runs outside any handler, so it needs the
+		// session's model registry.
+		setModelRegistry(ctx.modelRegistry);
 		// Start watchdog.
 		if (!watchdogTimer) {
 			watchdogTimer = setInterval(() => {
@@ -400,7 +410,10 @@ export default function (pi: ExtensionAPI) {
 			// through this tool, so they are exempt by construction.
 			const matched = catalogueRecords.find((m) => `${m.provider}/${m.id}` === modelArg);
 			const blacklistPattern = blockedBy(cfg, matched ?? { provider, id: modelId });
-			if (blacklistPattern) {
+			// A user pick via /subagent grants a one-time override for exactly
+			// this model; every other blacklisted model stays refused.
+			const userPicked = takeModelOverride(modelArg);
+			if (blacklistPattern && !userPicked) {
 				const allowed = dispatchableModelRecords(ctx, cfg).map((m) => `${m.provider}/${m.id}`);
 				const roleHints = role?.models?.suggested ?? [];
 				const roleNote = roleHints.length > 0
@@ -511,7 +524,7 @@ export default function (pi: ExtensionAPI) {
 			return {
 				content: [{
 					type: "text",
-					text: `Dispatched "${name}" (id ${id}) → ${modelArg}${roleName ? ` [role ${roleName}]` : ""} [group ${group}, perms ${entry.permissionsLabel}]. Model chosen by the main agent, from the role's models.suggested where applicable. Non-blocking — you'll be woken on completion. Status: /subagents.`,
+					text: `Dispatched "${name}" (id ${id}) → ${modelArg}${roleName ? ` [role ${roleName}]` : ""} [group ${group}, perms ${entry.permissionsLabel}].${userPicked ? " User-picked model: the models.blacklist fence was overridden once for this dispatch." : " Model chosen by the main agent, from the role's models.suggested where applicable."} Non-blocking — you'll be woken on completion. Status: /subagents.`,
 				}],
 				details: {},
 			};
@@ -556,6 +569,10 @@ export default function (pi: ExtensionAPI) {
 			return { content: [{ type: "text", text: `Cancelled ${params.id}.` }], details: {} };
 		},
 	});
+
+	// ---------------- /subagent command ----------------
+
+	registerSubagentCommand(pi);
 
 	// ---------------- /subagents panel ----------------
 

@@ -43,6 +43,12 @@ catalogue by construction. The main session's own model is never affected.
 Empty or missing `suggested`/`blacklist` mean no constraint; entries are
 treated as plain strings, never as allowlist or regex.
 
+A `/subagent <model> <prompt>` pick is the third human-pick surface. It
+completes against every connected model (`modelRegistry.getAvailable()`,
+the list `/model` offers), blacklisted models included, and grants a one-time override bound to exactly the picked
+`provider/modelId`; `dispatch` consumes that override on the next dispatch of
+that model and refuses every other blacklisted model as before.
+
 Role prompts: a role's `systemPrompt` field in `subagent.json` is a *suggested*
 prompt, not a forced injection. The main agent may pass it through, edit it,
 replace it, or supply an ad-hoc one via `dispatch`'s `systemPrompt` parameter.
@@ -90,6 +96,8 @@ and gated-goal share one process-wide registry.
 | Path | Purpose |
 |---|---|
 | `extensions/subagent/index.ts` | tools, watchdog, child guard, default system prompt |
+| `extensions/subagent/command.ts` | `/subagent` command: model completion, argument parsing, request hand-over |
+| `extensions/subagent/override.ts` | one-time blacklist override for a human-picked model |
 | `extensions/subagent/scheduler.ts` | live registry, subscriptions, semaphores |
 | `extensions/subagent/runner.ts` | child spawn, JSON capture, timeout, tool gate, context-file gate |
 | `extensions/subagent/panel.ts` | bordered `/subagents` overlay |
@@ -193,6 +201,32 @@ Bordered opaque focused overlay. `up/down` or `j/k` selects, Enter toggles
 output expansion, `a` toggles all/recent, and Escape/q/Ctrl+C closes. Registry
 subscriptions push tool results and final output immediately; no idle redraw
 loop snaps scrollback.
+
+## `/subagent` command
+
+`/subagent <provider/modelId> <prompt>` — the user names the model, the agent
+still dispatches.
+
+- **Completion.** The model argument completes against every connected
+  model (`ctx.modelRegistry.getAvailable()`, the list `/model` offers), fuzzy-filtered with the same
+  helper the built-in `/model` selector uses (`fuzzyFilter` from
+  `@earendil-works/pi-tui`). The item label is the model id, the description
+  the provider, and the inserted value the exact `provider/modelId` target
+  followed by a space. Only the first argument is completed: once the prompt
+  starts, the argument text is the prompt, not a model token. The registry is
+  captured at `session_start` (the completion runs outside any handler) and
+  refreshed on every invocation; it reads the live catalogue.
+- **Resolution.** The first token is the model: `provider/modelId`, or a bare
+  model id resolved against the catalogue (ambiguous ids are reported with
+  their candidates). The rest of the arguments are the user's prompt,
+  verbatim.
+- **Hand-over.** The command grants a one-time blacklist override for exactly
+  the resolved model and sends the main agent a message naming that model, the
+  user's request verbatim, and the instruction to gather the missing context
+  itself (the diff under review, the files discussed, ...) and to decide task,
+  permissions, timeout, and role. The dispatch decisions stay with the agent.
+- **Errors.** A missing model, an unknown model, and an empty prompt are
+  reported through `ctx.ui.notify` as errors; nothing is sent to the agent.
 
 ## Verification and limitations
 

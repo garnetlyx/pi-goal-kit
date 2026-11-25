@@ -50,7 +50,7 @@ install. Use `pi config` to disable any you don't want.
 |---|---|---|
 | [reminder-hook](extensions/reminder-hook/docs/DESIGN.md) | Park any wait, resume on a predicate | `set_reminder`, `cancel_reminder` / `/reminders`, `/cancel-reminder` |
 | [todo](extensions/todo/docs/DESIGN.md) | Task list with a wait-aware completion nudge | `todo` / `/todos` |
-| [subagent](extensions/subagent/docs/DESIGN.md) | Non-blocking delegation, no allowlist | `dispatch`, `dispatch_status`, `dispatch_cancel`, `subagent_roles` / `/subagents` |
+| [subagent](extensions/subagent/docs/DESIGN.md) | Non-blocking delegation, no allowlist | `dispatch`, `dispatch_status`, `dispatch_cancel`, `subagent_roles` / `/subagent`, `/subagents` |
 | [gated-goal](extensions/gated-goal/docs/DESIGN.md) | Six-phase loop behind a frozen plan | `freeze_plan`, `confirm_done`, `reject_done` / `/gated-goal`, `/gated-goal-exit`, `/gated-goal-status` |
 
 **reminder-hook** — the agent writes the completion condition as a shell
@@ -79,6 +79,12 @@ extension never silently picks one. Most multi-agent setups make you predeclare
 every agent in YAML and redeploy to add one. The same stack serves both
 **collaboration** (parallel delegation) and **adversarial QA** (gated-goal's
 read-only reviewer).
+
+`/subagent <provider/modelId> <prompt>` is the human-driven counterpart: the
+model argument completes from every connected model, the request reaches the
+agent with the prompt verbatim, and the pick is exempt from
+`models.blacklist` for that one dispatch — the fence guards the agent's
+autonomous choice, not the user's.
 
 The child locates the host `pi` binary even when the running process reports
 it as Bun's Windows virtual entry path (`B:/~BUN/root/pi`), so dispatch and

@@ -1,11 +1,7 @@
 import { EventEmitter } from "node:events";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 import { PassThrough } from "node:stream";
 import type { Message } from "@earendil-works/pi-ai";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import subagentExtension from "../extensions/subagent/index.ts";
 
 // These tests exercise the full extension, but a host pi child process (e.g.
 // the gated-goal reviewer) runs the suite with PI_SUBAGENT_CHILD=1, which
@@ -21,6 +17,7 @@ import { createProcessTerminator, runChild } from "../extensions/subagent/runner
 import { captureMessage, genId, getFinalOutput, markWaitDone, registry, Semaphore, type DispatchEntry } from "../extensions/subagent/scheduler.ts";
 import { blockedBy, isModelBlockedBy, normalize as normalizeConfig } from "../extensions/subagent/config.ts";
 import { sanitizeNotificationField } from "../extensions/subagent/index.ts";
+import { executionContext, extensionHarness, useAgentConfig } from "./harness.ts";
 
 function entry(status: DispatchEntry["status"]): DispatchEntry {
 	return {
@@ -35,57 +32,6 @@ function entry(status: DispatchEntry["status"]): DispatchEntry {
 		lastActivityAt: Date.now(),
 		status,
 		messages: [],
-	};
-}
-
-function extensionHarness() {
-	const tools = new Map<string, any>();
-	const handlers = new Map<string, Array<(event: unknown, ctx: any) => unknown>>();
-	const emitted: Array<{ name: string; data: any }> = [];
-	const pi = {
-		events: {
-			emit(name: string, data: any) { emitted.push({ name, data }); },
-		},
-		on(name: string, handler: (event: unknown, ctx: any) => unknown) {
-			const list = handlers.get(name) ?? [];
-			list.push(handler);
-			handlers.set(name, list);
-		},
-		registerTool(definition: any) { tools.set(definition.name, definition); },
-		registerCommand() {},
-		sendUserMessage: vi.fn(),
-	} as any;
-	subagentExtension(pi);
-	return { pi, tools, handlers, emitted };
-}
-
-type TestModel = { provider: string; id: string; name: string };
-
-function executionContext(models: TestModel | TestModel[] = { provider: "test", id: "model", name: "model" }) {
-	const list = Array.isArray(models) ? models : [models];
-	return {
-		cwd: process.cwd(),
-		hasUI: false,
-		ui: { notify: vi.fn() },
-		scopedModels: list.map((model) => ({ model })),
-		modelRegistry: {
-			getAvailable: () => list,
-			getAll: () => list,
-		},
-	} as any;
-}
-
-/** Point PI_CODING_AGENT_DIR at a temp dir with a controlled subagent.json
- *  so loadConfig (read per tool call) sees exactly this policy. */
-function useAgentConfig(cfg: Record<string, unknown>): () => void {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagent-test-"));
-	fs.writeFileSync(path.join(dir, "subagent.json"), JSON.stringify(cfg));
-	const saved = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = dir;
-	return () => {
-		if (saved === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = saved;
-		fs.rmSync(dir, { recursive: true, force: true });
 	};
 }
 

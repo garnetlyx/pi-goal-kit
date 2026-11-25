@@ -36,7 +36,11 @@ any model whose name contains it; a provider fragment blocks a whole
 provider). Blacklisted models are refused by `dispatch` and hidden from the
 `subagent_roles` catalogue and suggestion resolution. The fence binds the
 agent's autonomous choice only — explicit human picks (e.g. the gated-goal
-reviewer model picker) are never filtered.
+reviewer model picker) are never filtered. A `/subagent <model> <prompt>`
+pick is exempt for that one dispatch: it grants a one-time override bound to
+exactly the picked model, so `dispatch` accepts it once. Every other
+blacklisted model stays refused, and the override is consumed by that single
+dispatch.
 
 The session model registry (`models.json` plus any registered providers) is the
 source of truth for actual availability. `subagent.json` is the single
@@ -134,6 +138,14 @@ review is not final authority.
 
 - `subagent_roles`: show role preferences and currently available suggestion
   matches before choosing.
+- `/subagent <provider/modelId> <prompt>`: user-driven pick of the model. The
+  model argument completes from every connected model (blacklisted models
+  included); the request reaches you as a user message naming that model, and
+  the pick is exempt from `models.blacklist` for that one dispatch. Gather the
+  missing context yourself (for a review: the current diff, the recent
+  changes, the files discussed in this conversation), write one self-contained
+  task from it plus the user's request, and decide permissions, timeout, and
+  role yourself.
 - `/subagents`: bordered focused overlay; `↑↓`/`j`/`k` navigate, Enter expands,
   `a` toggles all/recent, `esc`/`q`/`Ctrl+C` closes. Registry updates push tool
   results and final output without idle redraws.
