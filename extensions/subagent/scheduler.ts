@@ -57,7 +57,6 @@ export interface DispatchEntry {
 	stopReason?: string;
 	errorMessage?: string;
 	retryAttempts?: number; // auto_retry attempts observed on the child stream
-	providerError?: string; // finalError of an exhausted auto-retry (the provider's own words)
 	lastStopReason?: string; // stopReason of the final assistant message
 	// internal lifecycle handles
 	kill?: () => void;

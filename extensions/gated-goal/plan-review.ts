@@ -23,13 +23,19 @@
  * be the whole line, outside code fences (`isStandaloneApproval`).
  */
 
-import { rmSync } from "node:fs";
+import { realpathSync, rmdirSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join as joinPath } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { writeTempFile } from "../subagent/runner.ts";
 import { loadConfig } from "../subagent/config.ts";
 import { spawnReviewer, deadlineNotice, isStandaloneApproval } from "./reviewer.ts";
 import { buildFrozenPrompt, FROZEN_ENTRY, hashPrompt, type GatedGoalState } from "./state.ts";
+
+/** File name the runner gives the transcript inside its `pi-subagent-*` dir. */
+const TRANSCRIPT_FILE = "transcript-gated-goal.md";
+const TEMP_DIR_PREFIX = "pi-subagent-";
 
 export type TodoItem = { text: string; status?: "todo" | "pending" | "done" };
 
@@ -86,6 +92,47 @@ export function renderTranscript(entries: SessionEntry[]): string {
 
 export async function writeTranscript(text: string): Promise<{ dir: string; file: string }> {
 	return writeTempFile("transcript", "gated-goal", text);
+}
+
+/** Is `dir` a transcript dir this extension could have created (a runner temp
+ *  dir under the OS temp dir)? Anything else in `transcriptDir` — a stale or
+ *  hand-edited path — must never be deleted on the gate's authority. */
+export function ownsTranscriptDir(dir: string): boolean {
+	let resolved: string;
+	try {
+		resolved = realpathSync(dir);
+	} catch {
+		return false; // gone already: nothing to own, nothing to delete
+	}
+	let tmp: string;
+	try {
+		tmp = realpathSync(tmpdir());
+	} catch {
+		return false;
+	}
+	return dirname(resolved) === tmp && basename(resolved).startsWith(TEMP_DIR_PREFIX);
+}
+
+/** Remove only the transcript file, then its dir if that is empty now. Never
+ *  throws: cleanup must not strand the gate, and a failure here costs a stray
+ *  temp file, not a wrong deletion. Returns true when the dir is gone. */
+export function removeTranscript(dir: string): boolean {
+	try {
+		if (!ownsTranscriptDir(dir)) return false;
+		unlinkSync(joinPath(dir, TRANSCRIPT_FILE));
+	} catch { /* already gone or not ours to touch */ }
+	try {
+		rmdirSync(dir);
+		return true;
+	} catch { /* not empty (other files live there) or not ours: leave it */ }
+	return false;
+}
+
+/** Restart recovery: the previous process died mid-review, so no `finally`
+ *  ran. Delete what is ours, keep everything else, and report so the state
+ *  can be cleared either way. */
+export function removeCrashedTranscript(dir: string): boolean {
+	return removeTranscript(dir);
 }
 
 export interface PlanProposal {
@@ -180,7 +227,7 @@ export async function runIntentReview(pi: ExtensionAPI, ctx: ExtensionContext, s
 		return gone() ? { kind: "stale" } : { kind: "failed", message: String(err?.message ?? err) };
 	}
 	if (gone()) {
-		rmSync(transcript.dir, { recursive: true, force: true });
+		removeTranscript(transcript.dir);
 		return { kind: "stale" };
 	}
 	control.onTranscript?.(transcript.dir);
@@ -193,7 +240,7 @@ export async function runIntentReview(pi: ExtensionAPI, ctx: ExtensionContext, s
 	} catch (err: any) {
 		return gone() ? { kind: "stale" } : { kind: "failed", message: String(err?.message ?? err) };
 	} finally {
-		rmSync(transcript.dir, { recursive: true, force: true });
+		removeTranscript(transcript.dir);
 		if (!gone()) control.onTranscript?.(undefined);
 	}
 }
@@ -207,8 +254,36 @@ export interface FreezeGate {
 	epoch(): number;
 	save(ctx: ExtensionContext, state: GatedGoalState): void;
 	setStatus(ctx: ExtensionContext): void;
+	/** Send a follow-up message to the agent. */
+	say(ctx: ExtensionContext, text: string): void;
 	/** Install the frozen plan and enter ACT: hash, archive, todo:replace, follow-up. */
 	enterAct(ctx: ExtensionContext, todos: TodoItem[], frozenPrompt: string): void;
+}
+
+/** Footer hint for the freeze phases, derived from persisted state so it
+ *  survives the agent_settled refresh (which lands exactly when the user
+ *  reads the agent's questions) and a resume. Empty outside P2.5. */
+export function freezeStatusHint(state: GatedGoalState): string {
+	if (state.phase === "freeze") return `intent review ${state.freezeRejections + 1}/${state.maxIteration}`;
+	if (state.phase === "plan" && state.freezeRejections > 0) return `freeze rejected ${state.freezeRejections}/${state.maxIteration}`;
+	return "";
+}
+
+/** `session_start` found `phase: "freeze"`: the intent review died with the
+ *  previous process, so nothing was decided and nothing was charged. Remove
+ *  the transcript the crash left behind (only if it is ours), flip to PLAN
+ *  with the counter kept, and tell the agent to re-submit. */
+export function recoverInterruptedFreeze(pi: ExtensionAPI, ctx: ExtensionContext, state: GatedGoalState, gate: FreezeGate): boolean {
+	if (state.phase !== "freeze") return false;
+	if (state.transcriptDir) {
+		removeCrashedTranscript(state.transcriptDir);
+		state.transcriptDir = undefined;
+	}
+	state.phase = "plan";
+	gate.save(ctx, state);
+	gate.setStatus(ctx);
+	gate.say(ctx, `⚠️ The intent review of your freeze attempt (${state.freezeRejections + 1}/${state.maxIteration}) was interrupted by a restart before it returned a verdict — not charged. Back in PLAN. Call freeze_plan again to re-run the review.`);
+	return true;
 }
 
 const error = (text: string) => ({ content: [{ type: "text" as const, text }], details: {}, isError: true });
@@ -263,18 +338,25 @@ export function registerFreezePlanTool(pi: ExtensionAPI, gate: FreezeGate): void
 			gate.save(ctx, s);
 			gate.setStatus(ctx);
 
-			const outcome = await runIntentReview(pi, ctx, s, { prompt: frozenPrompt, todos: params.todos }, attempt, {
-				signal: signal ?? undefined,
-				isStale,
-				onTranscript: (dir) => {
-					s.transcriptDir = dir;
-					gate.save(ctx, s);
-				},
-			});
+			let outcome: IntentReviewOutcome;
+			try {
+				outcome = await runIntentReview(pi, ctx, s, { prompt: frozenPrompt, todos: params.todos }, attempt, {
+					signal: signal ?? undefined,
+					isStale,
+					onTranscript: (dir) => {
+						s.transcriptDir = dir;
+						gate.save(ctx, s);
+					},
+				});
+			} catch (err: any) {
+				// Nothing in the review may strand the gate in freeze.
+				outcome = isStale() ? { kind: "stale" } : { kind: "failed", message: String(err?.message ?? err) };
+			}
 
 			// Exit / restart / session switch while the intent reviewer ran: this
-			// call no longer owns the gate. Nothing is frozen, nothing is written.
-			if (outcome.kind === "stale") return error("freeze_plan aborted: the gate changed during the intent review (exit, restart or session switch). Nothing was frozen.");
+			// call no longer owns the gate. Rechecked here, after the outer await,
+			// before any verdict is applied — nothing is frozen, nothing is written.
+			if (isStale() || outcome.kind === "stale") return error("freeze_plan aborted: the gate changed during the intent review (exit, restart or session switch). Nothing was frozen.");
 
 			if (outcome.kind === "approved") {
 				s.freezeRejections = 0;
@@ -283,12 +365,11 @@ export function registerFreezePlanTool(pi: ExtensionAPI, gate: FreezeGate): void
 			}
 
 			s.phase = "plan";
-			const rejected = outcome.kind === "rejected";
-			if (rejected) s.freezeRejections = attempt;
+			if (outcome.kind === "rejected") s.freezeRejections = attempt;
 			gate.save(ctx, s);
 			gate.setStatus(ctx);
 
-			if (rejected) {
+			if (outcome.kind === "rejected") {
 				ctx.ui.notify(`freeze_plan rejected by the intent reviewer (${attempt}/${s.maxIteration})`, "warning");
 				return error(
 					`NOT frozen — the intent reviewer rejected this plan (rejection ${attempt}/${s.maxIteration}).\n\n${outcome.output}\n\nDiscuss each point with the user, adjust the plan to their answers, then call freeze_plan again.` +

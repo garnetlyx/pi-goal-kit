@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { filePath, FROZEN_ENTRY } from "../extensions/gated-goal/state.ts";
@@ -15,17 +15,27 @@ const spawnReviewer = vi.fn((..._a: any[]) => undefined as any);
 const runReview = vi.fn((..._a: any[]) => undefined as any);
 const cancelActiveReviewer = vi.fn((..._a: any[]) => true);
 const pingReviewer = vi.fn(async (..._a: any[]) => {});
-vi.mock("../extensions/gated-goal/reviewer.ts", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../extensions/gated-goal/reviewer.ts")>()),
-	spawnReviewer: (...a: unknown[]) => spawnReviewer(...a),
-	runReview: (...a: unknown[]) => runReview(...a),
-	cancelActiveReviewer: (...a: unknown[]) => cancelActiveReviewer(...a),
-	pingReviewer: (...a: unknown[]) => pingReviewer(...a),
-}));
+const actualReviewer = vi.hoisted(() => ({ current: null as null | typeof import("../extensions/gated-goal/reviewer.ts") }));
+vi.mock("../extensions/gated-goal/reviewer.ts", async (importOriginal) => {
+	actualReviewer.current = await importOriginal<typeof import("../extensions/gated-goal/reviewer.ts")>();
+	return {
+		...actualReviewer.current,
+		spawnReviewer: (...a: unknown[]) => spawnReviewer(...a),
+		runReview: (...a: unknown[]) => runReview(...a),
+		cancelActiveReviewer: (...a: unknown[]) => cancelActiveReviewer(...a),
+		pingReviewer: (...a: unknown[]) => pingReviewer(...a),
+	};
+});
 const writeTempFile = vi.fn((..._a: any[]) => undefined as any);
+const runChild = vi.fn(async (opts: any) => {
+	opts.entry.status = "done";
+	opts.entry.finalOutput = DONE;
+	return opts.entry;
+});
 vi.mock("../extensions/subagent/runner.ts", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../extensions/subagent/runner.ts")>()),
 	writeTempFile: (...a: unknown[]) => writeTempFile(...a),
+	runChild: (opts: unknown) => runChild(opts),
 }));
 
 const { default: activate } = await import("../extensions/gated-goal/index.ts");
@@ -310,6 +320,88 @@ describe("gated-goal plan freeze loop (P2.5)", () => {
 		expect(h.sent).toHaveLength(0);
 	});
 
+	it("restart cleanup removes only a transcript dir the gate owns; an unrelated directory survives and recovery still returns to PLAN", async () => {
+		const unrelated = mkdtempSync(join(agentDir, "unrelated-"));
+		writeFileSync(join(unrelated, "precious.txt"), "keep me");
+		const foreign = mkdtempSync(join(tmpdir(), "not-ours-"));
+		writeFileSync(join(foreign, "x.txt"), "keep");
+		seedState({ phase: "freeze", freezeRejections: 1, transcriptDir: unrelated });
+		let h = await start();
+		expect(readState().phase).toBe("plan");
+		expect(readState().transcriptDir).toBeUndefined();
+		expect(existsSync(join(unrelated, "precious.txt"))).toBe(true);
+
+		seedState({ phase: "freeze", transcriptDir: foreign });
+		h = await start();
+		expect(readState().phase).toBe("plan");
+		expect(existsSync(join(foreign, "x.txt"))).toBe(true);
+		expect(h.sent.some((t: string) => t.includes("interrupted by a restart"))).toBe(true);
+	});
+
+	it("removeTranscript deletes the transcript file and its dir only when empty, never other files", async () => {
+		const { removeTranscript, ownsTranscriptDir } = await import("../extensions/gated-goal/plan-review.ts");
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagent-test-"));
+		writeFileSync(join(dir, "transcript-gated-goal.md"), "user conversation");
+		writeFileSync(join(dir, "something-else.md"), "not ours");
+		expect(ownsTranscriptDir(dir)).toBe(true);
+		expect(removeTranscript(dir)).toBe(false);          // dir kept: another file lives there
+		expect(existsSync(join(dir, "transcript-gated-goal.md"))).toBe(false);
+		expect(existsSync(join(dir, "something-else.md"))).toBe(true);
+		rmSync(join(dir, "something-else.md"));
+		expect(removeTranscript(dir)).toBe(true);           // now empty → gone
+		expect(existsSync(dir)).toBe(false);
+		const outside = mkdtempSync(join(agentDir, "pi-subagent-lookalike-"));
+		expect(ownsTranscriptDir(outside)).toBe(false);     // right name, wrong place
+	});
+
+	it("a cleanup failure during the review cannot strand the gate in freeze", async () => {
+		seedState();
+		const h = await start();
+		// A read-only parent makes removing the transcript dir fail with EPERM.
+		const parent = mkdtempSync(join(tmpdir(), "pi-subagent-ro-"));
+		const dir = join(parent, "pi-subagent-inner");
+		mkdirSync(dir);
+		writeFileSync(join(dir, "transcript-gated-goal.md"), "x");
+		chmodSync(parent, 0o500);
+		try {
+			writeTempFile.mockImplementationOnce(async () => ({ dir, file: join(dir, "transcript-gated-goal.md") }));
+			const result = await callTool(h, "freeze_plan", PLAN, ctx);
+			expect(result.isError).toBeFalsy();
+			expect(readState().phase).toBe("act");
+			expect(existsSync(join(dir, "transcript-gated-goal.md"))).toBe(true); // left behind, but reported nowhere as a crash
+		} finally {
+			chmodSync(parent, 0o700);
+			rmSync(parent, { recursive: true, force: true });
+		}
+	});
+
+	it("an exit while the reviewer child is still being prepared aborts it the moment it exists", async () => {
+		seedState();
+		const h = await start();
+		spawnReviewer.mockImplementationOnce(actualReviewer.current!.spawnReviewer);
+		cancelActiveReviewer.mockImplementationOnce(actualReviewer.current!.cancelActiveReviewer);
+		let preparing!: () => void;
+		const began = new Promise<void>((r) => { preparing = r; });
+		runChild.mockImplementationOnce(async (opts: any) => {
+			preparing();                                   // entry published, prompt not yet written, no kill handle
+			await new Promise<void>((r) => setTimeout(r, 20));
+			// What the real runner does with an aborted signal right after spawn: terminate at once.
+			expect(opts.signal.aborted).toBe(true);
+			opts.entry.status = "cancelled";
+			opts.entry.stopReason = "aborted";
+			return opts.entry;
+		});
+		const pending = callTool(h, "freeze_plan", PLAN, ctx);
+		await began;
+		await h.commands.get("gated-goal-exit")!.handler("", ctx);
+		const result = await pending;
+		expect(result.isError).toBe(true);
+		expect(result.content[0].text).toContain("aborted");
+		expect(readState().phase).toBe("idle");
+		expect(readState().exitReason).toBe("aborted by user");
+		expect(h.sent.filter((t: string) => t.includes("Plan frozen"))).toHaveLength(0);
+	});
+
 	it("the footer derives the freeze hints from state, so they survive the settle refresh and a resume", async () => {
 		seedState();
 		const h = await start();
@@ -347,10 +439,16 @@ describe("gated-goal plan freeze loop (P2.5)", () => {
 });
 
 describe("intent review verdict protocol (standalone tag outside fences)", () => {
-	it("approves only a line that is exactly the tag", () => {
+	it("approves only a line that is exactly the tag (surrounding line whitespace aside)", () => {
 		expect(isStandaloneApproval(DONE)).toBe(true);
 		expect(isStandaloneApproval("Review complete.\n\n<promise>DONE</promise>\n")).toBe(true);
-		expect(isStandaloneApproval("<promise> done </promise>")).toBe(true);
+		expect(isStandaloneApproval("  <promise>DONE</promise>  \nsummary on the next line")).toBe(true);
+	});
+
+	it("rejects case or spacing variants of the tag", () => {
+		expect(isStandaloneApproval("<promise> done </promise>")).toBe(false);
+		expect(isStandaloneApproval("<Promise>DONE</Promise>")).toBe(false);
+		expect(isStandaloneApproval("<promise>\tDONE</promise>")).toBe(false);
 	});
 
 	it("rejects mentions sharing the line with the tag", () => {
@@ -359,10 +457,13 @@ describe("intent review verdict protocol (standalone tag outside fences)", () =>
 		expect(isStandaloneApproval("do not output <promise>DONE</promise> until the user answers")).toBe(false);
 	});
 
-	it("rejects a tag inside a closed or an unclosed code fence", () => {
+	it("rejects a tag inside a closed or an unclosed code fence, and treats an info-string fence line as content, not a closing fence", () => {
 		expect(isStandaloneApproval("```\n<promise>DONE</promise>\n```")).toBe(false);
 		expect(isStandaloneApproval("Example output:\n```\n<promise>DONE</promise>")).toBe(false);
 		expect(isStandaloneApproval("~~~\n<promise>DONE</promise>\n~~~\nstill not a verdict")).toBe(false);
+		// ```text after an opening fence is content (CommonMark: a closing fence carries no info string)
+		expect(isStandaloneApproval("```\nexample\n```text\n<promise>DONE</promise>\n```")).toBe(false);
+		expect(isStandaloneApproval("```text\n<promise>DONE</promise>\n```\n<promise>DONE</promise>")).toBe(true);
 	});
 });
 

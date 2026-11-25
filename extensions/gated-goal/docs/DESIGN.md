@@ -57,7 +57,7 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │   ambiguities?          │
                                    │ freezeRejections >=     │
                                    │   maxIter → skip to P3  │
-                                   │ line starting with      │
+                                   │ a line that is exactly  │
                                    │ <promise>DONE</promise>?│
                                    │   ├─ no (verdict) ──────┘
                                    │   │    back to P2 with the
@@ -391,7 +391,10 @@ reviews differ only in prompt and task. Each reviewer:
 - runs with `--no-context-files` (`contextFiles: false` → `runChild`), so the
   reviewed project's own `AGENTS.md` / `CLAUDE.md` cannot rewrite the review
   standard. Those files load regardless of project trust, so trust settings are
-  not a substitute. Ordinary `dispatch` still inherits them by default.
+  not a substitute. Ordinary `dispatch` still inherits them by default. The
+  bundle's `general-principles` injector honours the same flag (verified with a
+  real child process: with `--no-context-files` no AGENTS.md reaches the
+  reviewer's context), otherwise the flag would only look like isolation.
 - runs under a hard timeout from user config — `gatedGoal.reviewTimeoutSec`
   in `<agent dir>/subagent.json` (default 1800s), enforced by `runChild`
   (SIGTERM→SIGKILL). On timeout it is treated as a crash: `runReviewCycle`

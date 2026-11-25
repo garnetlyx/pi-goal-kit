@@ -114,7 +114,7 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │   ambiguities?          │
                                    │ freezeRejections >=     │
                                    │   maxIter → skip to P3  │
-                                   │ line starting with      │
+                                   │ a line that is exactly  │
                                    │ <promise>DONE</promise>?│
                                    │   ├─ no (verdict) ──────┘
                                    │   │    back to P2 with the

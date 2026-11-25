@@ -39,7 +39,6 @@
  * escape hatch out of the gate).
  */
 
-import { rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -55,7 +54,7 @@ import {
 	save,
 } from "./state.ts";
 import { pingReviewer, runReview, cancelActiveReviewer } from "./reviewer.ts";
-import { registerFreezePlanTool, type TodoItem } from "./plan-review.ts";
+import { freezeStatusHint, recoverInterruptedFreeze, registerFreezePlanTool, type FreezeGate, type TodoItem } from "./plan-review.ts";
 import { availableModels } from "../subagent/models.ts";
 import { pickModel } from "../subagent/model-picker.ts";
 import {
@@ -164,37 +163,30 @@ export default function (pi: ExtensionAPI) {
 				`⚠️ Review ${state.reviewsCompleted + 1}/${state.maxIteration} was interrupted by a restart before it returned a verdict — its feedback is lost and no iteration was charged. Back in ACT. If all work is complete, present your completion summary and stop — a fresh review will run automatically.`,
 				{ deliverAs: "followUp" },
 			);
-		} else if (state.phase === "freeze") {
-			// The intent reviewer's verdict died with the previous process: not a
-			// rejection, so nothing is counted. Back to PLAN; the agent re-submits.
-			// A crash skips the transcript's finally — remove what it left behind.
-			if (state.transcriptDir) {
-				rmSync(state.transcriptDir, { recursive: true, force: true });
-				state.transcriptDir = undefined;
-			}
-			state.phase = "plan";
-			save(ctx, state);
-			setStatus(ctx);
-			pi.sendUserMessage(
-				`⚠️ The intent review of your freeze attempt (${state.freezeRejections + 1}/${state.maxIteration}) was interrupted by a restart before it returned a verdict — not charged. Back in PLAN. Call freeze_plan again to re-run the review.`,
-				{ deliverAs: "followUp" },
-			);
+		} else {
+			// P2.5 owns its own recovery (transcript cleanup included).
+			recoverInterruptedFreeze(pi, ctx, state, freezeGate);
 		}
 	});
 
 	function setStatus(ctx: ExtensionContext, extra?: string): void {
 		if (!ctx.hasUI) return;
-		// The freeze hints come from persisted state, not from the event that last
-		// ran: the rejection hint must survive the agent_settled refresh that
-		// happens exactly when the user reads its questions, and a resume.
-		const derived = state.phase === "freeze"
-			? `intent review ${state.freezeRejections + 1}/${state.maxIteration}`
-			: state.phase === "plan" && state.freezeRejections > 0
-				? `freeze rejected ${state.freezeRejections}/${state.maxIteration}`
-				: "";
+		// Without an event-driven hint the freeze phases derive theirs from
+		// persisted state, so they survive the agent_settled refresh and a resume.
 		const phase = state.phase === "idle" ? "" : ` gated-goal[${state.phase}] ${state.reviewsCompleted}/${state.maxIteration}`;
-		ctx.ui.setStatus?.("gated-goal", (phase + " " + (extra ?? derived)).trim());
+		ctx.ui.setStatus?.("gated-goal", (phase + " " + (extra ?? freezeStatusHint(state))).trim());
 	}
+
+	// What plan-review.ts may do to the gate. P2.5's tool, budget, recovery and
+	// footer hints live there; this is the whole of its access to the gate.
+	const freezeGate: FreezeGate = {
+		state: () => state,
+		epoch: () => gateEpoch,
+		save,
+		setStatus,
+		say: (ctx, text) => pi.sendUserMessage(text, { deliverAs: "followUp" }),
+		enterAct: (ctx, todos, frozenPrompt) => freeze(ctx, todos, frozenPrompt),
+	};
 
 	/** Kill the gate: sever in-flight review continuations, kill the reviewer
 	 *  child, persist idle. The one teardown path, shared by `/gated-goal-exit`,
@@ -350,7 +342,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ---- /gated-goal command ----
 	pi.registerCommand("gated-goal", {
-		description: "Start gated-goal mode: /gated-goal [maxIteration] [reviewerModel]. Phases: select reviewer → plan → act → review loop.",
+		description: "Start gated-goal mode: /gated-goal [maxIteration] [reviewerModel]. Phases: select reviewer → plan → freeze (intent review) → act → review/verify loop.",
 		handler: async (args, ctx) => {
 			let abortedPhase: GatedGoalState["phase"] | undefined;
 			if (state.phase !== "idle") {
@@ -475,20 +467,7 @@ export default function (pi: ExtensionAPI) {
 			{ deliverAs: "followUp" },
 		);
 	};
-
-	// ---- freeze_plan tool (P2 → P2.5 → P3) ----
-	// Freezing is the only exit from PLAN, gated twice: by the user's explicit
-	// confirmation (the agent's duty) and by the intent reviewer, who reads the
-	// session transcript and audits the proposal against what the user actually
-	// asked for. The tool, its budget and its transitions live in plan-review.ts;
-	// the gate only exposes its state, epoch, persistence and ACT entry.
-	registerFreezePlanTool(pi, {
-		state: () => state,
-		epoch: () => gateEpoch,
-		save,
-		setStatus,
-		enterAct: freeze,
-	});
+	registerFreezePlanTool(pi, freezeGate);
 
 	// ---- confirm_done / reject_done tools (VERIFY phase) ----
 	// After the reviewer returns <promise>DONE</promise>, control passes to the

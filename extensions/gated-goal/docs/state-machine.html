@@ -554,7 +554,7 @@ const INFO = {
              'A rejected plan comes back here with the reviewer\'s reasons; the agent relays the questions to the user.',
              'An empty array or any blank todo is rejected before state changes.'] },
   freeze: { tag:'P2.5 · gate 0', chip:'phase: freeze', sub:'The reviewer reads this session\'s transcript and audits the plan against the user\'s intent: nothing material added, dropped or silently decided.',
-    bullets:['Approved (a line starting with <code>&lt;promise&gt;DONE&lt;/promise&gt;</code>) → the canonical four-section prompt is sha256-hashed and stored, <code>phase</code> becomes <code>act</code>, <code>freezeRejections</code> resets.',
+    bullets:['Approved (a line consisting of exactly <code>&lt;promise&gt;DONE&lt;/promise&gt;</code>, outside code fences) → the canonical four-section prompt is sha256-hashed and stored, <code>phase</code> becomes <code>act</code>, <code>freezeRejections</code> resets.',
              'Rejected → back to <code>plan</code>, <code>freezeRejections++</code>; at <code>maxIteration</code> the next freeze_plan skips this review.',
              'No verdict (timeout/crash) or the review could not run → back to <code>plan</code>, nothing counted.',
              'The transcript lives as a 0600 file in the OS temp dir exactly as long as the review.'] },

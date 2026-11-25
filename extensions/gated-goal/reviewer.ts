@@ -52,27 +52,31 @@ export function isApproved(output: string): boolean {
 
 /** Drop fenced code blocks line by line. Unlike the regex above this also
  *  treats an opening fence that is never closed as code through the end of the
- *  output, so a verdict "after" an unclosed fence cannot leak out. */
+ *  output, so a verdict "after" an unclosed fence cannot leak out. A closing
+ *  fence is a line of marker characters only (CommonMark): a line such as
+ *  ```text is an opening with an info string, never a closing. */
 export function stripFencedBlocks(output: string): string {
 	const out: string[] = [];
 	let fence: string | undefined;
 	for (const line of output.split(/\r?\n/)) {
-		const m = line.match(/^[ \t]*(`{3,}|~{3,})/);
+		const opening = line.match(/^[ \t]*(`{3,}|~{3,})/);
+		const closing = line.match(/^[ \t]*(`{3,}|~{3,})[ \t]*$/);
 		if (!fence) {
-			if (m) fence = m[1];
+			if (opening) fence = opening[1];
 			else out.push(line);
-		} else if (m && m[1][0] === fence[0] && m[1].length >= fence.length) {
+		} else if (closing && closing[1][0] === fence[0] && closing[1].length >= fence.length) {
 			fence = undefined;
 		}
 	}
 	return out.join("\n");
 }
 
-const STANDALONE_PROMISE_RE = /^<promise>\s*DONE\s*<\/promise>$/i;
+const STANDALONE_PROMISE_RE = /^<promise>DONE<\/promise>$/;
 
 /** The plan intent review's approval (P2.5): the promise tag alone on a line
- *  of its own, outside code fences. Anything else sharing the line — a summary,
- * "is an example", a negation — is a mention, not a verdict. */
+ *  of its own, outside code fences, exactly as specified — case, spacing and
+ *  all. Anything else is a mention: a summary or negation sharing the line, a
+ *  lower-case or spaced variant, a tag inside a fence. */
 export function isStandaloneApproval(output: string): boolean {
 	return stripFencedBlocks(output).split(/\r?\n/).some((line) => STANDALONE_PROMISE_RE.test(line.trim()));
 }
@@ -203,6 +207,11 @@ export interface ReviewResult {
  * background — a late-arriving result after exit must not wake the loop.
  */
 let activeEntry: DispatchEntry | undefined;
+/** Aborted by cancelActiveReviewer from the moment the entry is published, so a
+ *  cancellation that lands while the runner is still preparing the child
+ *  (writing its prompt, spawning) reaches the child the instant it exists
+ *  instead of relying on `entry.kill`, which is installed only after spawn. */
+let activeAbort: AbortController | undefined;
 
 /** Kill the in-flight reviewer (same mechanics as dispatch_cancel). The
  *  wait:done emission stays in runReview's finally, so nothing double-fires.
@@ -212,6 +221,7 @@ export function cancelActiveReviewer(): boolean {
 	if (!e || (e.status !== "queued" && e.status !== "running" && e.status !== "hung")) return false;
 	e.status = "cancelled";
 	e.endedAt = Date.now();
+	try { activeAbort?.abort(); } catch { /* ignore */ }
 	try { e.abort?.(); } catch { /* ignore */ }
 	try { e.kill?.(); } catch { /* ignore */ }
 	registry.changed();
@@ -225,8 +235,15 @@ export function cancelActiveReviewer(): boolean {
 export async function spawnReviewer(pi: ExtensionAPI, ctx: ExtensionContext, opts: { name: string; task: string; model: string; permissions: string[]; systemPrompt: string; timeoutSec: number; signal?: AbortSignal }): Promise<{ output: string; status: string; exitCode?: number }> {
 	const entry = buildReviewerEntry({ name: opts.name, model: opts.model, task: opts.task, group: "default" });
 	registry.add(entry);
+	const controller = new AbortController();
 	activeEntry = entry;
+	activeAbort = controller;
 	pi.events.emit("wait:active", { source: "subagent", id: entry.id });
+	const onCallerAbort = () => controller.abort();
+	if (opts.signal) {
+		if (opts.signal.aborted) controller.abort();
+		else opts.signal.addEventListener("abort", onCallerAbort, { once: true });
+	}
 
 	try {
 		await runChild({
@@ -234,14 +251,18 @@ export async function spawnReviewer(pi: ExtensionAPI, ctx: ExtensionContext, opt
 			permissions: opts.permissions,
 			systemPrompt: opts.systemPrompt,
 			timeoutSec: opts.timeoutSec,
-			signal: opts.signal,
+			signal: controller.signal,
 			// The reviewer's standard is the prompt it was given (frozen plan or
 			// proposed plan), not the reviewed project's own AGENTS.md / CLAUDE.md.
 			contextFiles: false,
 		});
 	} finally {
+		if (opts.signal) opts.signal.removeEventListener("abort", onCallerAbort);
 		pi.events.emit("wait:done", { source: "subagent", id: entry.id });
-		if (activeEntry === entry) activeEntry = undefined;
+		if (activeEntry === entry) {
+			activeEntry = undefined;
+			activeAbort = undefined;
+		}
 	}
 	// An empty finalOutput must not hide why the child failed: the runner's
 	// errorMessage (provider error, exhausted retries) is the diagnostic.
