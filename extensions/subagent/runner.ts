@@ -185,6 +185,10 @@ export async function runChild(opts: {
 				if (ev.type === "auto_retry_start") {
 					e.retryAttempts = Math.max(e.retryAttempts ?? 0, ev.attempt ?? 0);
 					registry.touch(e.id);
+				} else if (ev.type === "auto_retry_end" && ev.success === false && ev.finalError) {
+					// Keep the provider's own words (e.g. "503: No available accounts") so
+					// the failure classified below can say what actually happened.
+					e.providerError = String(ev.finalError);
 				}
 			};
 
@@ -282,13 +286,14 @@ export async function runChild(opts: {
 			e.status = "failed";
 			e.stopReason = finalAssistantStop;
 			e.errorMessage = e.errorMessage
+				|| e.providerError
 				|| `subagent ended with stopReason="${finalAssistantStop}"${retriedHard ? ` after ${e.retryAttempts} auto-retr${(e.retryAttempts ?? 0) > 1 ? "ies" : "y"}` : ""}`;
 		} else if (!e.finalOutput.trim() && retriedHard) {
 			// No usable text output and retries happened — treat as failure so we
 			// don't report a silent "(no output)" success.
 			e.status = "failed";
 			e.stopReason = "empty_after_retry";
-			e.errorMessage = `no output after ${e.retryAttempts} auto-retr${(e.retryAttempts ?? 0) > 1 ? "ies" : "y"}`;
+			e.errorMessage = e.providerError || `no output after ${e.retryAttempts} auto-retr${(e.retryAttempts ?? 0) > 1 ? "ies" : "y"}`;
 		} else {
 			e.status = "done";
 		}

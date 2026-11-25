@@ -3,11 +3,12 @@
  * prompt. Reuses the subagent runner so reviewers appear in the /subagents
  * panel and emit wait:active/wait:done like any other wait.
  *
- * Three entry points:
+ * Two entry points:
  *   pingReviewer   — quick connectivity check (P1). Throws on failure/timeout.
  *   runReview      — full review of the work (P4). Returns { done, output, tampered }.
- *   runPlanReview  — intent review of the plan the main agent wants to freeze
- *                    (P2.5). Returns { approved, output, status }.
+ * The plan intent review (P2.5) is driven by plan-review.ts through the same
+ * child spawn (`spawnReviewer`) so both kinds of reviewer share the registry,
+ * the cancellable active entry and the context isolation.
  *
  * Hash integrity: the frozen prompt is re-checked against its hash at spawn
  * time. On mismatch the copy archived in the session at freeze time is used and
@@ -16,7 +17,8 @@
  *
  * Promise parsing: the review passes only when the child finished cleanly AND
  * <promise>DONE</promise> appears as a line of its own outside any code fence.
- * Mentioning the tag inline (quoting or negating it) is not a verdict.
+ * Mentioning the tag inline (quoting or negating it) is not a verdict. The plan
+ * intent review (P2.5) is stricter still: the tag must be the whole line.
  *
  * Context isolation: reviewer children run with --no-context-files, so the
  * project's own AGENTS.md / CLAUDE.md cannot rewrite the review standard. The
@@ -46,6 +48,33 @@ const FENCED_BLOCK_RE = /^[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?^[ \t]*\1[^\n]*$/gm
 export function isApproved(output: string): boolean {
 	const prose = output.replace(FENCED_BLOCK_RE, "");
 	return prose.split(/\r?\n/).some((line) => PROMISE_LINE_RE.test(line.trim()));
+}
+
+/** Drop fenced code blocks line by line. Unlike the regex above this also
+ *  treats an opening fence that is never closed as code through the end of the
+ *  output, so a verdict "after" an unclosed fence cannot leak out. */
+export function stripFencedBlocks(output: string): string {
+	const out: string[] = [];
+	let fence: string | undefined;
+	for (const line of output.split(/\r?\n/)) {
+		const m = line.match(/^[ \t]*(`{3,}|~{3,})/);
+		if (!fence) {
+			if (m) fence = m[1];
+			else out.push(line);
+		} else if (m && m[1][0] === fence[0] && m[1].length >= fence.length) {
+			fence = undefined;
+		}
+	}
+	return out.join("\n");
+}
+
+const STANDALONE_PROMISE_RE = /^<promise>\s*DONE\s*<\/promise>$/i;
+
+/** The plan intent review's approval (P2.5): the promise tag alone on a line
+ *  of its own, outside code fences. Anything else sharing the line — a summary,
+ * "is an example", a negation — is a mention, not a verdict. */
+export function isStandaloneApproval(output: string): boolean {
+	return stripFencedBlocks(output).split(/\r?\n/).some((line) => STANDALONE_PROMISE_RE.test(line.trim()));
 }
 
 function buildReviewerEntry(opts: { name: string; model: string; task: string; group: string }): DispatchEntry {
@@ -115,37 +144,6 @@ export function buildReviewerSystemPrompt(frozenPrompt: string, opts: { timeoutS
 	].join("\n");
 }
 
-/** The intent reviewer's system prompt (P2.5): the proposed plan, the path of
- *  the rendered transcript, the attempt counter and the verdict protocol. */
-export function buildIntentReviewPrompt(plan: string, opts: { transcriptPath: string; attempt: number; max: number; deadline: string }): string {
-	return [
-		"You are an intent reviewer operating in an isolated context window: you check a PLAN before it is frozen, against the conversation the main agent had with the user.",
-		"You cannot dispatch further subagents. You have no write or edit tools. Your bash access is for reading files only — do not create, modify, or delete anything.",
-		"",
-		opts.deadline,
-		"",
-		`This is freeze attempt ${opts.attempt}/${opts.max}.`,
-		"",
-		"Inputs:",
-		"- The PROPOSED PLAN the main agent wants to freeze (below).",
-		`- The session transcript, rendered to a file: ${opts.transcriptPath} (read it; page with offset if it is long).`,
-		"  Roles: USER lines are what the human wrote — except lines starting with 🎯 📋 ✅ ⚠️ 🚪 🔁 ⏫, which are workflow messages injected by the gated-goal extension (instructions to the agent), not the user's words. ASSISTANT lines are the main agent's replies; tool calls and results are compacted.",
-		"",
-		"Judge exactly two things:",
-		"1. Intent match — does the plan do what the user asked? Flag anything material the plan adds that the user did not ask for or agree to, and anything material it drops or weakens. Later user statements override earlier ones.",
-		"2. Ambiguity — is there anything the user must clarify before work starts: a choice the plan silently makes, a term with two plausible readings, conflicting user statements? Flag only what would change the work or its verification; do not nitpick wording.",
-		"If the transcript shows the agent already tried to freeze this plan and the user has not addressed the earlier issues since, say so and reject again.",
-		"",
-		"--- PROPOSED PLAN ---",
-		plan,
-		"--- END PROPOSED PLAN ---",
-		"",
-		"Output rules:",
-		"- If and only if the plan matches the user's intent and nothing material needs clarifying: START a line with <promise>DONE</promise>, followed by a one-line summary.",
-		"- Otherwise output two lists: \"Intent mismatches:\" (the user's words vs. the plan) and \"Questions to ask the user:\" (concrete, answerable questions — the agent will relay them to the user).",
-		"- A line beginning with that tag IS the approval. If you are not approving, do not write those characters at all — not to quote them, not to negate them, not inside a code block.",
-	].join("\n");
-}
 /** Quick connectivity probe. Throws Error on any failure or timeout.
  *  The window comes from user config (`gatedGoal.pingTimeoutSec` in subagent.json),
  *  never from the main agent. */
@@ -222,8 +220,9 @@ export function cancelActiveReviewer(): boolean {
 
 /** Spawn one reviewer child and wait for it to exit. Shared by the plan intent
  *  review and the work review so both appear in /subagents, share the one
- *  cancellable `activeEntry`, and run under the same context isolation. */
-async function spawnReviewer(pi: ExtensionAPI, ctx: ExtensionContext, opts: { name: string; task: string; model: string; permissions: string[]; systemPrompt: string; timeoutSec: number }): Promise<{ output: string; status: string; exitCode?: number }> {
+ *  cancellable `activeEntry`, and run under the same context isolation.
+ *  `signal` aborts the child (the caller's tool call was cancelled). */
+export async function spawnReviewer(pi: ExtensionAPI, ctx: ExtensionContext, opts: { name: string; task: string; model: string; permissions: string[]; systemPrompt: string; timeoutSec: number; signal?: AbortSignal }): Promise<{ output: string; status: string; exitCode?: number }> {
 	const entry = buildReviewerEntry({ name: opts.name, model: opts.model, task: opts.task, group: "default" });
 	registry.add(entry);
 	activeEntry = entry;
@@ -235,6 +234,7 @@ async function spawnReviewer(pi: ExtensionAPI, ctx: ExtensionContext, opts: { na
 			permissions: opts.permissions,
 			systemPrompt: opts.systemPrompt,
 			timeoutSec: opts.timeoutSec,
+			signal: opts.signal,
 			// The reviewer's standard is the prompt it was given (frozen plan or
 			// proposed plan), not the reviewed project's own AGENTS.md / CLAUDE.md.
 			contextFiles: false,
@@ -243,7 +243,9 @@ async function spawnReviewer(pi: ExtensionAPI, ctx: ExtensionContext, opts: { na
 		pi.events.emit("wait:done", { source: "subagent", id: entry.id });
 		if (activeEntry === entry) activeEntry = undefined;
 	}
-	return { output: entry.finalOutput ?? entry.errorMessage ?? "(no output)", status: entry.status, exitCode: entry.exitCode };
+	// An empty finalOutput must not hide why the child failed: the runner's
+	// errorMessage (provider error, exhausted retries) is the diagnostic.
+	return { output: entry.finalOutput || entry.errorMessage || "(no output)", status: entry.status, exitCode: entry.exitCode };
 }
 
 /** A child that did not finish cleanly (timeout, crash, cancellation) has
@@ -273,34 +275,4 @@ export async function runReview(pi: ExtensionAPI, ctx: ExtensionContext, state: 
 	});
 	const verdict = verdictOf(run.status, run.output);
 	return { done: verdict.approved, output: verdict.output, tampered, restored, exitCode: run.exitCode, status: verdict.status };
-}
-
-export interface PlanReviewResult {
-	approved: boolean;
-	output: string;
-	status: string;
-}
-
-/**
- * P2.5: the reviewer audits the plan the main agent wants to freeze against
- * the session transcript (rendered by plan-review.ts) — does it match the
- * user's intent, is anything ambiguous? Same window, permissions and verdict
- * protocol as a work review; the caller owns the freeze-loop accounting. */
-export async function runPlanReview(pi: ExtensionAPI, ctx: ExtensionContext, state: GatedGoalState, opts: { plan: string; transcriptPath: string; attempt: number; max: number }): Promise<PlanReviewResult> {
-	const { reviewTimeoutSec } = loadConfig(ctx).gatedGoal;
-	const systemPrompt = buildIntentReviewPrompt(opts.plan, {
-		transcriptPath: opts.transcriptPath,
-		attempt: opts.attempt,
-		max: opts.max,
-		deadline: deadlineNotice(reviewTimeoutSec, Date.now()),
-	});
-	const run = await spawnReviewer(pi, ctx, {
-		name: `plan-reviewer-${opts.attempt}`,
-		task: `Intent review of freeze attempt ${opts.attempt}/${opts.max}: does the proposed plan match the user's intent? Transcript: ${opts.transcriptPath}`,
-		model: state.reviewerModel,
-		permissions: state.reviewerPermissions,
-		systemPrompt,
-		timeoutSec: reviewTimeoutSec,
-	});
-	return verdictOf(run.status, run.output);
 }

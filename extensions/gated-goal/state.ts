@@ -32,6 +32,10 @@ export interface GatedGoalState {
 	exitReason?: string;
 	/** Project path captured when the run was first saved. Used to detect path changes. */
 	originalCwd?: string;
+	/** OS-temp dir holding the rendered transcript while a P2.5 intent review
+	 *  runs. Persisted so a restart can remove a transcript left behind by a
+	 *  crash (the normal path deletes it in a finally). */
+	transcriptDir?: string;
 }
 
 export const DEFAULT_MAX_ITERATION = 10;

@@ -107,11 +107,14 @@ describe("gated-goal exit vs in-flight review (epoch latch)", () => {
 		await flush();
 		expect(readState().phase).toBe("review");
 
-		resolveReview({ done: false, output: "", tampered: false, restored: false, status: "failed" });
+		// The reviewer's own failure text (provider error, exhausted retries) must
+		// reach the agent: "crashed (failed)" alone cannot be acted on.
+		resolveReview({ done: false, output: "503: No available accounts", tampered: false, restored: false, status: "failed" });
 		await flush();
 
 		expect(readState().phase).toBe("act");
 		expect(h.sent.some((t: string) => t.includes("Back to ACT"))).toBe(true);
+		expect(h.sent.some((t: string) => t.includes("crashed (failed)") && t.includes("Detail: 503: No available accounts"))).toBe(true);
 	});
 
 	it("a new gate started over an in-flight review severs the old continuation", async () => {

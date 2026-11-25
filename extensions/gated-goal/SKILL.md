@@ -37,14 +37,16 @@ Discuss the goal with the user until they explicitly confirm. Then call
 - `todos` — work items. These **replace** your todo list, so include everything
   ACT needs and do not re-add them afterwards.
 
-`freeze_plan` submits the plan to the intent reviewer (next phase) and, once
-approved, hashes it and enters ACT. **Only call it after explicit user
-confirmation.** The frozen prompt is immutable for the rest of the run.
+`freeze_plan` submits the plan — sections **and todos** — to the intent reviewer
+(next phase) and, once approved, hashes it and enters ACT. **Only call it
+after the user has seen the plan and explicitly confirmed it.** The frozen
+prompt is immutable for the rest of the run.
 
 ### P2.5 — freeze (intent review)
 The reviewer reads this session's transcript and audits the plan against what
 the user actually asked for: does it add anything they did not ask for, drop
 anything they did, or silently decide something that still needs their answer?
+Todos are judged exactly like the sections.
 
 - **Approved** → the plan is frozen and you are in ACT.
 - **Rejected** → `freeze_plan` returns an error with the reviewer's reasons

@@ -593,7 +593,7 @@ const INFO = {
 const EMPTY = () => ({
   phase:'idle', maxIteration:10, reviewsCompleted:0, freezeRejections:0, reviewerModel:null,
   reviewerPermissions:null, frozenPrompt:null, frozenHash:null,
-  startedAt:null, originalCwd:null, exitReason:null
+  startedAt:null, originalCwd:null, transcriptDir:null, exitReason:null
 });
 let S = EMPTY();
 let maxPref = 10, selected = 'idle', playing = null, seq = 0;
@@ -619,7 +619,10 @@ const E = {
       return { edge:'e-ping-fail', node:'abortping', tone:'bad', msg:'ping failed → abort · <b>nothing left active</b>' }; } },
 
   freeze_plan: { label:'freeze_plan()', note:'4 sections + todos → intent review', tone:'go', from:['plan'],
-    run(){ S.phase='freeze';
+    run(){
+      if (S.freezeRejections >= S.maxIteration){ S.phase='act'; S.freezeRejections=0; S.frozenPrompt='## Outcome …\\n## Verification …\\n## Constraints …\\n## Code Quality Requirements …'; S.frozenHash = hex(64);
+        return { edge:'e-plan-ok', node:'act', tone:'go', msg:`intent review <b>skipped</b> · freezeRejections ${S.maxIteration}/${S.maxIteration} used · plan frozen · <b>P3 ACT</b>` }; }
+      S.phase='freeze';
       return { edge:'e-freeze', node:'freeze', tone:'go', msg:`plan submitted · <b>P2.5 FREEZE</b> · intent review ${S.freezeRejections + 1}/${S.maxIteration}` }; } },
 
   plan_ok: { label:'intent: DONE', note:'plan matches the user\'s intent', tone:'go', from:['freeze'],
@@ -636,11 +639,6 @@ const E = {
   plan_crash: { label:'intent review: no verdict', note:'timeout / crash · not counted', tone:'bad', from:['freeze'],
     run(){ S.phase='plan';
       return { edge:'e-plan-reject', node:'plan', tone:'bad', msg:'no verdict · <b>not counted</b> · back to <b>PLAN</b>' }; } },
-
-  plan_skip: { label:'freeze_plan() · budget spent', note:'freezeRejections ≥ maxIteration', tone:'go', from:['plan'],
-    run(){ S.phase='act'; S.freezeRejections=0; S.frozenPrompt='## Outcome …\\n## Verification …\\n## Constraints …\\n## Code Quality Requirements …';
-      S.frozenHash = hex(64);
-      return { edge:'e-plan-ok', node:'act', tone:'go', msg:'intent review <b>skipped</b> (budget exhausted) · plan frozen · <b>P3 ACT</b>' }; } },
 
   settle_continue: { label:'todo:settled = continue', note:'one fresh nudge sent', from:['act'],
     run(){ return { edge:'e-hold', node:'act', tone:'sys', msg:'incomplete list · nudged once → stay in <b>ACT</b>' }; } },
@@ -750,7 +748,7 @@ function paint(live){
 
 let prevJson = null;               // null = first paint, nothing flashes
 const ORDER = ['phase','maxIteration','reviewsCompleted','freezeRejections','reviewerModel','reviewerPermissions',
-               'frozenPrompt','frozenHash','startedAt','originalCwd','exitReason'];
+               'frozenPrompt','frozenHash','startedAt','originalCwd','transcriptDir','exitReason'];
 function renderJson(){
   const view = {};
   ORDER.forEach(k => {
@@ -939,7 +937,7 @@ function reset(){
 /* ═══ scenarios ════════════════════════════════════════ */
 const SCEN = {
   'happy path': { max:10, steps:['start','ping_ok','freeze_plan','plan_ok','settle_continue','settle_review','review_done','confirm_done'] },
-  'ambiguous plan': { max:2, steps:['start','ping_ok','freeze_plan','plan_reject','freeze_plan','plan_reject','freeze_plan','plan_skip','settle_review','review_done','confirm_done'] },
+  'ambiguous plan': { max:2, steps:['start','ping_ok','freeze_plan','plan_reject','freeze_plan','plan_reject','freeze_plan','settle_review','review_done','confirm_done'] },
   'rubber-stamp caught': { max:3, steps:['start','ping_ok','freeze_plan','plan_ok','settle_review','review_done','reject_done','settle_review','review_done','confirm_done'] },
   'budget exhausted': { max:2, steps:['start','ping_ok','freeze_plan','plan_ok','settle_review','review_changes','settle_wait','settle_review','review_changes'] },
   'cold reviewer': { max:10, steps:['start','ping_fail'] }

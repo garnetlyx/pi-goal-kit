@@ -395,6 +395,45 @@ describe("subagent process termination", () => {
 	});
 });
 
+describe("subagent provider auto-retry classification", () => {
+	it("reports the provider's final error when auto-retries are exhausted with no output", async () => {
+		const item = entry("running");
+		registry.add(item);
+		const child = new EventEmitter() as any;
+		child.stdout = new PassThrough();
+		child.stderr = new PassThrough();
+		child.kill = vi.fn(() => true);
+		const spawnProcess = vi.fn(() => {
+			queueMicrotask(() => child.emit("spawn"));
+			return child;
+		});
+
+		const running = runChild({
+			pi: {} as any,
+			ctx: { cwd: process.cwd() } as any,
+			entry: item,
+			modelArg: "test/model",
+			permissions: [],
+			timeoutSec: 60,
+			spawnProcess: spawnProcess as any,
+		});
+		await new Promise<void>((resolve) => child.once("spawn", resolve));
+		// The pi json-mode child exits 0 even when its provider retries are exhausted.
+		for (const ev of [
+			{ type: "auto_retry_start", attempt: 1 },
+			{ type: "auto_retry_start", attempt: 5 },
+			{ type: "auto_retry_end", success: false, attempt: 5, finalError: '503: {"message":"No available accounts","type":"api_error"}' },
+		]) child.stdout.write(JSON.stringify(ev) + "\n");
+		child.emit("close", 0, null);
+		await running;
+
+		expect(item.status).toBe("failed");
+		expect(item.retryAttempts).toBe(5);
+		expect(item.errorMessage).toContain("503");
+		expect(item.errorMessage).toContain("No available accounts");
+	});
+});
+
 describe("subagent notifications", () => {
 	it("removes OSC delimiters and control bytes without changing ordinary Unicode", () => {
 		expect(sanitizeNotificationField("任务;line\u0007next\u001b]777")).toBe("任务,line next ]777");

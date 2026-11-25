@@ -114,8 +114,8 @@ manual `/gated-goal-exit`.
 | Path | Purpose |
 |------|---------|
 | `extensions/gated-goal/index.ts` | `/gated-goal`, `/gated-goal-exit`, `/gated-goal-status` commands; `freeze_plan`, `confirm_done`, `reject_done` tools; consumes todo's P3→P4 settle disposition; `extractSection` helper |
-| `extensions/gated-goal/plan-review.ts` | P2.5: `renderTranscript` (session branch → text), `writeTranscript` (0600 temp file), `runIntentReview` (transcript → reviewer → transcript deleted; classifies the outcome, never throws) |
-| `extensions/gated-goal/reviewer.ts` | reviewer prompts (`buildReviewerSystemPrompt`, `buildIntentReviewPrompt`, `deadlineNotice`), the shared child spawn, `pingReviewer` (P1 probe), `runReview` (P4), `runPlanReview` (P2.5), `isApproved`, `cancelActiveReviewer` |
+| `extensions/gated-goal/plan-review.ts` | The P2.5 step: `renderTranscript`, `writeTranscript`, `buildIntentReviewPrompt`, `runIntentReview` (transcript → reviewer → transcript deleted; abort signal, staleness, never throws) and the `freeze_plan` tool with its budget and transitions (`registerFreezePlanTool` over the `FreezeGate` interface) |
+| `extensions/gated-goal/reviewer.ts` | reviewer prompts (`buildReviewerSystemPrompt`, `deadlineNotice`), the shared child spawn `spawnReviewer`, `pingReviewer` (P1), `runReview` (P4), verdict parsing (`isApproved`, `isStandaloneApproval`), `cancelActiveReviewer` |
 | `extensions/gated-goal/state.ts` | load/save the session state file; phase types (`idle|plan|freeze|act|review|verify`); frozen-prompt hashing; integrity check |
 | `extensions/gated-goal/SKILL.md` | agent-facing phase guide |
 
@@ -135,7 +135,8 @@ hardcoded, since it differs between a stock install and a bundled one.
   "frozenPrompt": "## Outcome\n...\n## Verification\n...\n## Constraints\n...\n## Code Quality Requirements\n...",
   "frozenHash": "<sha256 of frozenPrompt>",
   "startedAt": 1785300000000,
-  "originalCwd": "/path/to/project/when/the/run/started"
+  "originalCwd": "/path/to/project/when/the/run/started",
+  "transcriptDir": "/os/tmp/pi-subagent-XXXX (only while a P2.5 review runs)"
 }
 ```
 
@@ -171,10 +172,12 @@ A review cycle is fire-and-forget: `runReviewCycle` spawns the reviewer and
 its continuation acts on the result when `await runReview` resolves — which
 can be minutes later. Every authoritative transition bumps `gateEpoch`:
 `teardownGate` (the one teardown path, shared by `exitGate` and the start-over
-branch of `/gated-goal`) and `reload()` (session switch). A cycle captures the
-epoch at spawn and re-checks it after the await; a mismatch means the result
-belongs to a gate that no longer exists, and the continuation discards it — no
-phase write, no follow-up message. Without the latch, a reviewer that crashed
+branch of `/gated-goal`), `reload()` (session switch, incoming instance) and
+the outgoing instance's `session_shutdown` handler (session switch, `/reload`)
+bump it. A cycle — or a freeze call, which captures the epoch the same way
+— re-checks it after every await; a mismatch means the result belongs to a
+gate that no longer exists, and the continuation discards it — no phase
+write, no follow-up message. Without the latch, a reviewer that crashed
 *after* the user exited would write `phase: "act"` back over idle and inject
 "Back to ACT" into an exited session, resurrecting the loop (observed in the
 wild as `phase: act` + `exitReason` set in the same state file;
@@ -205,8 +208,79 @@ opening a session must not launch a review process on its own.
 
 A state file found in `freeze` is the same situation one step earlier: the
 intent review died with the process, so nothing was decided and nothing was
-charged. The handler flips to `plan` (the counter is kept) and sends a
+charged. The handler removes the transcript the crash left behind
+(`transcriptDir`), flips to `plan` (the counter is kept) and sends a
 follow-up telling the agent to call `freeze_plan` again so the review re-runs.
+
+## Plan freeze loop (P2.5)
+
+The plan is the standard every later phase is checked against, so the gate
+checks the plan itself before it becomes immutable. `freeze_plan` does not
+freeze; it submits. `plan-review.ts` owns the step end to end and drives the
+state machine through a small `FreezeGate` interface (live state, epoch,
+save, status, ACT entry); `index.ts` only provides that interface.
+
+**What is reviewed.** The proposal = the four canonical sections **plus the
+todos** that will be installed in ACT (a contradictory todo would otherwise
+become active without appearing in full in the review input). The evidence =
+the session's current branch, rendered by `renderTranscript` to a 0600 file in
+the OS temp dir: user and assistant prose in full, one line per tool call,
+tool results truncated, thinking and bookkeeping entries omitted. The session
+stores extension follow-ups exactly like human input, so the prompt describes
+them generically — workflow messages the gate injects, typically opening with
+an emoji marker, are the gate talking to the agent, not the user's intent. The
+reviewer (`runPlanReview`, same model, window, permissions and isolation as a
+work review) judges exactly two things: intent match (nothing material added,
+dropped or weakened; no todo contradicting the sections) and ambiguity
+(choices silently made, two-plausible-readings terms, conflicting statements,
+a confirmation taken before the user had seen what they were confirming).
+
+**Verdict protocol.** Stricter than P4's: approval is a line consisting of
+exactly `<promise>DONE</promise>`, outside code fences (`isStandaloneApproval`;
+an unclosed fence counts as code through the end). A tag sharing its line
+with anything else — a summary, "is an example", a negation — is a mention.
+Otherwise the reviewer outputs `Intent mismatches:` and `Questions to ask the
+user:`.
+
+**Outcomes and transitions.**
+
+- *Approved* → `freezeRejections = 0`, then the freeze itself: canonical
+  prompt hashed and stored, `phase: "act"`, archived as a `gated-goal-frozen`
+  session entry, `todo:replace` with the frozen items, follow-up to the agent.
+- *Rejected* → `phase: "plan"`, `freezeRejections = K`, warning notify, and an
+  isError result carrying the reviewer's text plus the instruction to discuss
+  each point with the user before calling again. When K reaches M the result
+  also states that the **next** call skips the review.
+- *No verdict* (child timed out, crashed, was cancelled) or the review could
+  not run at all (transcript I/O, spawn, config) → `phase: "plan"`, nothing
+  counted, isError telling the agent to inform the user before retrying. The
+  gate is never left in `freeze`.
+- *Budget exhausted* (`freezeRejections >= maxIteration` at the next call) →
+  the transition to ACT and the counter reset are persisted first, then the
+  user is told the review was skipped. See [Freeze budget](#freeze-budget-p25).
+
+Nothing forces a user turn between a rejection and the next call: the intent
+reviewer is told to reject again when the transcript shows the user has not
+addressed the earlier issues, and the cap bounds the ping-pong.
+
+**Cancellation.** The freeze call can lose the gate in three ways and checks
+for each: (1) `/gated-goal-exit`, start-over or a restart bumps the epoch —
+checked before the transcript is written, before the spawn and after the
+review, so a lost gate never spawns a reviewer, writes state or announces
+anything; (2) the tool call's abort signal (the user cancelled the turn) is
+passed through to the child spawn and prevents a spawn if already aborted —
+the review then counts as no verdict; (3) a session switch emits
+`session_shutdown` on the **outgoing** extension instance, whose continuations
+(the P4 review cycle, a freeze call) hold that instance's closures: the
+handler bumps its epoch and kills its reviewer child, because the incoming
+instance's `session_start` cannot reach them. The same handler covers
+`/reload`.
+
+**Transcript lifecycle.** Written just before the spawn, removed in a
+`finally` whatever the outcome, never announced. Its dir is persisted as
+`transcriptDir` while it exists so that a crash — which skips the `finally` —
+leaves nothing behind: the restart recovery removes it.
+
 
 ## Commands
 
@@ -261,46 +335,10 @@ configured window to first token will falsely fail — raise
 ### `freeze_plan` (P2 → P2.5 → P3)
 
 Parameters: `outcome`, `verification`, `constraints`, `quality` (all strings),
-plus `todos` (non-empty array of `{text, status?}` with non-blank text).
-
-Only valid while `phase === "plan"`. Elsewhere returns isError (so a second
-call while a freeze review is in flight is refused too). An empty array or any
-blank todo is rejected before state changes.
-
-**Budget exhausted** (`freezeRejections >= maxIteration`): the intent review is
-skipped with a warning notify and the plan freezes as proposed, so the loop can
-never park the gate; the result text says the review was skipped.
-
-Otherwise the call enters the freeze review:
-
-- Persists `phase: "freeze"` with the proposed prompt + hash, status
-  `intent review K/M` (K = `freezeRejections + 1`).
-- `runIntentReview` renders the session's current branch to a 0600 file in the
-  OS temp dir, spawns the reviewer (`runPlanReview`: same model, window,
-  permissions and `<promise>DONE</promise>` protocol as a work review, prompt
-  = `buildIntentReviewPrompt`) and deletes the transcript afterwards.
-- If the gate changed meanwhile (exit, restart, session switch — detected via
-  the epoch latch), returns isError and writes nothing.
-- **Approved** → `freezeRejections = 0`, then the freeze itself: canonical
-  prompt (`buildFrozenPrompt`) hashed and stored, `phase: "act"`, archived as
-  a `gated-goal-frozen` session entry (`pi.appendEntry`, the second store the
-  integrity check can recover from), `todo:replace` with the frozen items
-  (**replaces** the list wholesale — asking the model to add them appended to
-  its own PLAN list and routinely doubled the work), and a followUp telling
-  the agent to start acting without re-adding anything.
-- **Rejected** → `phase: "plan"`, `freezeRejections = K`, status
-  `freeze rejected K/M`, warning notify, and an isError result carrying the
-  reviewer's text plus the instruction to discuss each point with the user
-  before calling again. When K reaches M the result also states that the
-  **next** call skips the review.
-- **No verdict** (child timed out, crashed, was cancelled) or the review could
-  not run at all (transcript I/O, spawn, config) → `phase: "plan"`, nothing
-  counted, isError telling the agent to inform the user before retrying. The
-  gate is never left in `freeze`.
-
-Nothing forces a user turn between a rejection and the next call: the intent
-reviewer is told to reject again when the transcript shows the user has not
-addressed the earlier issues, and the cap bounds the ping-pong.
+plus `todos` (non-empty array of `{text, status?}` with non-blank text). Only
+valid while `phase === "plan"` (so a second call while a freeze review is in
+flight is refused); an empty array or any blank todo is rejected before state
+changes. Everything else it does is the [Plan freeze loop](#plan-freeze-loop-p25).
 
 ### `confirm_done` (P5 → exit done)
 
@@ -335,10 +373,10 @@ stops would park the loop there for good.
 
 ## Reviewer (`reviewer.ts`)
 
-`runReview`, `runPlanReview` and `pingReviewer` all reuse the subagent stack
-(`scheduler.ts` registry + `runner.ts` `runChild`) through one shared spawn
-(`spawnReviewer`); the two reviews differ only in prompt and task. Each
-reviewer:
+`runReview` and `pingReviewer` reuse the subagent stack (`scheduler.ts`
+registry + `runner.ts` `runChild`), and the plan intent review goes through
+the same shared spawn (`spawnReviewer`, exported for `plan-review.ts`); the two
+reviews differ only in prompt and task. Each reviewer:
 
 - is added to the registry → appears in `/subagents` with role `"reviewer"`
   (`reviewer-N` for work reviews, `plan-reviewer-N` for intent reviews)
@@ -487,9 +525,13 @@ Gated-goal composes the three earlier extensions:
 ## Footer status
 
 `setStatus("gated-goal", …)` shows `gated-goal[phase] reviews/max` while
-active, plus a phase hint (`planning`, `intent review K/M`, `acting`,
-`reviewing`, `verifying`, `iteration N`, `freeze rejected K/M`). Cleared on
-exit. Refreshed on `session_start` and `agent_settled`.
+active, plus a hint. Event-driven hints: `planning`, `acting`, `reviewing`,
+`verifying`, `iteration N`. The freeze hints are derived from persisted state
+every time the status is painted — `intent review K/M` in `freeze`,
+`freeze rejected K/M` in `plan` with rejections — so they survive the
+`agent_settled` refresh that lands exactly when the user reads the agent's
+questions, and a resume. Cleared on exit. Refreshed on `session_start` and
+`agent_settled`.
 
 ## Known limitations / trade-offs
 
@@ -521,3 +563,7 @@ exit. Refreshed on `session_start` and `agent_settled`.
   described to the reviewer in the prompt, not marked in the data. Its verdict
   is a model judgment; a reviewer that approves an ambiguous plan is caught
   only by the user, who is in the conversation anyway.
+- **A crash leaves the reviewer's prompt temp file behind.** When pi is killed
+  (SIGHUP) mid-review, no `finally` runs: the transcript is removed on the
+  next start (via `transcriptDir`), but the runner's `pi-subagent-*/prompt-*.md`
+  for the killed child is not tracked anywhere and stays in the OS temp dir.
