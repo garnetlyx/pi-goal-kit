@@ -1,9 +1,10 @@
 # pi-goal-kit
 
 **Goal-gated workflow for [Pi](https://pi.dev)** — four cooperating extensions.
-The design center is **gated-goal**: a five-phase loop that pins the acceptance
+The design center is **gated-goal**: a six-phase loop that pins the acceptance
 bar out of the agent's reach, keeps it self-driving mid-task, and gates
-completion behind an adversarial review. The other three (`reminder-hook`,
+completion behind an adversarial review — after the same reviewer has audited
+the plan against the user's intent. The other three (`reminder-hook`,
 `todo`, `subagent`) are useful standalone, and together they form the substrate
 gated-goal runs on.
 
@@ -50,7 +51,7 @@ install. Use `pi config` to disable any you don't want.
 | [reminder-hook](extensions/reminder-hook/docs/DESIGN.md) | Park any wait, resume on a predicate | `set_reminder`, `cancel_reminder` / `/reminders`, `/cancel-reminder` |
 | [todo](extensions/todo/docs/DESIGN.md) | Task list with a wait-aware completion nudge | `todo` / `/todos` |
 | [subagent](extensions/subagent/docs/DESIGN.md) | Non-blocking delegation, no allowlist | `dispatch`, `dispatch_status`, `dispatch_cancel`, `subagent_roles` / `/subagents` |
-| [gated-goal](extensions/gated-goal/docs/DESIGN.md) | Five-phase loop behind a frozen plan | `freeze_plan`, `confirm_done`, `reject_done` / `/gated-goal`, `/gated-goal-exit`, `/gated-goal-status` |
+| [gated-goal](extensions/gated-goal/docs/DESIGN.md) | Six-phase loop behind a frozen plan | `freeze_plan`, `confirm_done`, `reject_done` / `/gated-goal`, `/gated-goal-exit`, `/gated-goal-status` |
 
 **reminder-hook** — the agent writes the completion condition as a shell
 command (exit 0 = done), optionally gated by a time or countdown, plus a resume
@@ -86,8 +87,10 @@ v0.1.2; on earlier versions a Windows dispatch stayed `running` until its
 timeout).
 
 **gated-goal** — started by `/gated-goal [maxIteration] [reviewerModel]`.
-`freeze_plan` captures outcome, verification, constraints, and quality bars,
-then hashes and persists them, so the agent cannot quietly relax its own
+`freeze_plan` first has the reviewer audit the plan against the conversation
+with the user (intent match, open ambiguities; a rejected plan goes back to the
+user), then captures outcome, verification, constraints, and quality bars,
+hashes and persists them, so the agent cannot quietly relax its own
 success criteria mid-task. Completion then needs two independent passes:
 
 ```
@@ -95,14 +98,35 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │ ping "reply ok" (config: pingTimeoutSec)
                                    ├─ fail ─► abort to idle (nothing left active)
                                    ▼
-                                 P2 plan
-                                   │ agent + user align on goal
-                                   │ agent calls freeze_plan(outcome, verification,
-                                   │   constraints, quality, todos)
-                                   │ → frozen prompt hashed + persisted
-                                   │   (+ archived as a session entry)
-                                   │ → todo list REPLACED with the frozen
-                                   │   items (todo:replace event)
+                                 P2 plan  ◄──────────────────┐
+                                   │ agent + user align on   │
+                                   │   goal; agent calls     │
+                                   │   freeze_plan(outcome,  │
+                                   │   verification,         │
+                                   │   constraints, quality, │
+                                   │   todos)                │
+                                   ▼                         │
+                                 P2.5 freeze                 │
+                                   │ reviewer reads the      │
+                                   │   session transcript    │
+                                   │   and audits the plan:  │
+                                   │   intent match? open    │
+                                   │   ambiguities?          │
+                                   │ freezeRejections >=     │
+                                   │   maxIter → skip to P3  │
+                                   │ line starting with      │
+                                   │ <promise>DONE</promise>?│
+                                   │   ├─ no (verdict) ──────┘
+                                   │   │    back to P2 with the
+                                   │   │    reasons; counter++
+                                   │   ├─ no verdict (timeout/
+                                   │   │   crash) → P2, not counted
+                                   │   └─ yes → frozen prompt hashed
+                                   │       + persisted (+ archived
+                                   │       as a session entry)
+                                   │       → todo list REPLACED with
+                                   │       the frozen items
+                                   │       (todo:replace event)
                                    ▼
                                  P3 act  ◄───────────────────┐
                                    │ agent works the todos   │

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { filePath } from "../extensions/gated-goal/state.ts";
 import { TODO_SETTLED_EVENT } from "../extensions/todo/snapshot.ts";
+import { flush, makeHarness, type Ctx } from "./harness.ts";
 
 // The reviewer is the boundary we must fake: the real one spawns a child pi
 // process. Everything else (state machine, epoch latch, commands) runs for real.
@@ -17,40 +18,6 @@ vi.mock("../extensions/gated-goal/reviewer.ts", () => ({
 }));
 
 const { default: activate } = await import("../extensions/gated-goal/index.ts");
-
-// ---- minimal ExtensionAPI / ExtensionContext doubles ----
-
-type Ctx = any;
-type Handler = (e: unknown, ctx: Ctx) => Promise<void> | void;
-
-function makeHarness(ctx: Ctx) {
-	const eventHandlers = new Map<string, (data: unknown) => void>();
-	const hooks = new Map<string, Handler[]>();
-	const commands = new Map<string, { handler: (args: string, ctx: Ctx) => Promise<unknown> }>();
-	const sent: string[] = [];
-	const pi = {
-		on: (name: string, h: Handler) => {
-			if (!hooks.has(name)) hooks.set(name, []);
-			hooks.get(name)!.push(h);
-		},
-		events: {
-			on: (name: string, h: (d: unknown) => void) => eventHandlers.set(name, h),
-			emit: (name: string, data: unknown) => eventHandlers.get(name)?.(data),
-		},
-		registerCommand: (name: string, cmd: { handler: (args: string, ctx: Ctx) => Promise<unknown> }) => commands.set(name, cmd),
-		registerTool: (_t: unknown) => {},
-		sendUserMessage: (text: string, _opts?: unknown) => {
-			sent.push(text);
-		},
-		appendEntry: (_t: string, _d: unknown) => {},
-	};
-	const fire = async (name: string, e: unknown = {}) => {
-		for (const h of hooks.get(name) ?? []) await h(e, ctx);
-	};
-	return { pi, eventHandlers, commands, sent, fire };
-}
-
-const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe("gated-goal exit vs in-flight review (epoch latch)", () => {
 	let agentDir: string;

@@ -320,7 +320,7 @@ footer a:hover{border-bottom-color:var(--cyan)}
 <header class="masthead">
   <div>
     <h1><em>gated-goal</em> <b>/</b> state machine</h1>
-    <p class="sub">Five phases, two gates. An executable rendering of <code>DESIGN.md</code> — drive the run yourself and watch phase, iteration budget and persisted state move together.</p>
+    <p class="sub">Six phases, three gates. An executable rendering of <code>DESIGN.md</code> — drive the run yourself and watch phase, iteration budget and persisted state move together.</p>
   </div>
   <div class="stamp">
     <div>doc · <b>extensions/gated-goal</b></div>
@@ -336,7 +336,7 @@ footer a:hover{border-bottom-color:var(--cyan)}
     <section class="panel">
       <div class="panel__hd"><b>transition graph</b><span id="phaseRead">phase — idle</span></div>
       <div class="panel__bd stage">
-<svg id="graph" viewBox="0 0 800 830" role="img" aria-label="gated-goal five phase state machine">
+<svg id="graph" viewBox="0 0 800 830" role="img" aria-label="gated-goal six phase state machine">
   <defs>
     <marker id="m-line" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M0,1 L9,5 L0,9 z" fill="#2b4453"/></marker>
@@ -354,7 +354,9 @@ footer a:hover{border-bottom-color:var(--cyan)}
   <path id="e-start"        class="edge" d="M330,55 V102"/>
   <path id="e-ping-fail"    class="edge" d="M220,138 H206"/>
   <path id="e-ping-ok"      class="edge" d="M330,171 V222"/>
-  <path id="e-freeze"       class="edge" d="M330,291 V350"/>
+  <path id="e-freeze"       class="edge" d="M220,258 H200"/>
+  <path id="e-plan-ok"      class="edge" d="M110,291 V332 H330 V353"/>
+  <path id="e-plan-reject"   class="edge" d="M60,225 V205 H290 V225"/>
   <path id="e-settle"       class="edge" d="M330,419 V478"/>
   <path id="e-hold"         class="edge" d="M440,368 C500,354 500,406 442,392"/>
   <path id="e-verdict"      class="edge" d="M330,547 V606"/>
@@ -372,7 +374,8 @@ footer a:hover{border-bottom-color:var(--cyan)}
   <text class="elabel" x="342" y="82">/gated-goal [N] [model]</text>
   <text class="elabel elabel--alt" x="203" y="108" text-anchor="end">ping fail</text>
   <text class="elabel" x="342" y="200">reply “ok”</text>
-  <text class="elabel" x="342" y="325">freeze_plan() → hash · persist · todo:replace</text>
+  <text class="elabel elabel--alt" x="66" y="199">rejected · freezeRejections++ → PLAN</text>
+  <text class="elabel" x="342" y="345">approved (or budget spent → skip) · hash · persist · todo:replace</text>
   <text class="elabel" x="342" y="453">todo:settled = review</text>
   <text class="elabel" x="500" y="381">continue / wait</text>
   <text class="elabel" x="500" y="394">(todo owns this)</text>
@@ -408,6 +411,14 @@ footer a:hover{border-bottom-color:var(--cyan)}
     <text class="node__meta" x="424" y="250" text-anchor="end">agent + user align</text>
     <text class="node__name" x="236" y="276">PLAN</text>
     <text class="node__meta" x="424" y="278" text-anchor="end">freeze_plan()</text>
+  </g>
+
+  <g class="node" id="n-freeze" data-phase="freeze" tabindex="0" role="button" aria-label="phase 2.5 freeze — intent review">
+    <rect class="node__bg" x="20" y="225" width="180" height="66"/>
+    <text class="node__tag"  x="36" y="250">P2.5</text>
+    <text class="node__meta" x="184" y="250" text-anchor="end">intent review</text>
+    <text class="node__name" x="36" y="276">FREEZE</text>
+    <text class="node__meta" x="184" y="278" text-anchor="end">reads transcript</text>
   </g>
 
   <g class="node" id="n-act" data-phase="act" tabindex="0" role="button" aria-label="phase 3 act">
@@ -538,12 +549,15 @@ const INFO = {
              '<code>pingReviewer</code> sends “reply with exactly: ok” with the configured ping budget (<code>gatedGoal.pingTimeoutSec</code> in subagent.json, default 45s) and a minimal read-only prompt.',
              'Child status ≠ <code>done</code>, or output lacking “ok”, throws → error notify, abort to idle · <b>nothing left active</b>.',
              'Cold local models needing more than the configured window to first token will falsely fail here.'] },
-  plan: { tag:'P2', chip:'phase: plan', sub:'Agent and user align on the goal, then the plan is frozen — hashed, persisted, and mirrored into the todo list.',
-    bullets:['<code>freeze_plan(outcome, verification, constraints, quality, todos)</code> is the only exit.',
-             'Builds the canonical four-section prompt, sha256-hashes it, stores both in state.',
-             'Archives <code>{prompt, hash}</code> as a <code>gated-goal-frozen</code> session entry — a second store the integrity check can recover from.',
-             'Emits <code>todo:replace</code>, which <b>replaces</b> the list wholesale; appending instead would double the work list.',
+  plan: { tag:'P2', chip:'phase: plan', sub:'Agent and user align on the goal; freeze_plan then hands the plan to the intent reviewer (P2.5).',
+    bullets:['<code>freeze_plan(outcome, verification, constraints, quality, todos)</code> is the only exit — it enters the freeze review, or freezes directly once the freeze budget is spent.',
+             'A rejected plan comes back here with the reviewer\'s reasons; the agent relays the questions to the user.',
              'An empty array or any blank todo is rejected before state changes.'] },
+  freeze: { tag:'P2.5 · gate 0', chip:'phase: freeze', sub:'The reviewer reads this session\'s transcript and audits the plan against the user\'s intent: nothing material added, dropped or silently decided.',
+    bullets:['Approved (a line starting with <code>&lt;promise&gt;DONE&lt;/promise&gt;</code>) → the canonical four-section prompt is sha256-hashed and stored, <code>phase</code> becomes <code>act</code>, <code>freezeRejections</code> resets.',
+             'Rejected → back to <code>plan</code>, <code>freezeRejections++</code>; at <code>maxIteration</code> the next freeze_plan skips this review.',
+             'No verdict (timeout/crash) or the review could not run → back to <code>plan</code>, nothing counted.',
+             'The transcript lives as a 0600 file in the OS temp dir exactly as long as the review.'] },
   act: { tag:'P3', chip:'phase: act', sub:'The agent works the todos. Todo — not gated-goal — owns the decision about when acting is over.',
     bullets:['Todo is the sole owner of <code>agent_settled</code>, nudge de-duplication and active-wait semantics.',
              '<code>continue</code>: one fresh incomplete-list follow-up was sent → stay in ACT.',
@@ -577,7 +591,7 @@ const INFO = {
 
 /* ═══ runtime state ════════════════════════════════════ */
 const EMPTY = () => ({
-  phase:'idle', maxIteration:10, reviewsCompleted:0, reviewerModel:null,
+  phase:'idle', maxIteration:10, reviewsCompleted:0, freezeRejections:0, reviewerModel:null,
   reviewerPermissions:null, frozenPrompt:null, frozenHash:null,
   startedAt:null, originalCwd:null, exitReason:null
 });
@@ -604,10 +618,29 @@ const E = {
     run(){ S = EMPTY(); S.maxIteration = maxPref;
       return { edge:'e-ping-fail', node:'abortping', tone:'bad', msg:'ping failed → abort · <b>nothing left active</b>' }; } },
 
-  freeze_plan: { label:'freeze_plan()', note:'4 sections + todos', tone:'go', from:['plan'],
-    run(){ S.phase='act'; S.frozenPrompt='## Outcome …\\n## Verification …\\n## Constraints …\\n## Code Quality Requirements …';
+  freeze_plan: { label:'freeze_plan()', note:'4 sections + todos → intent review', tone:'go', from:['plan'],
+    run(){ S.phase='freeze';
+      return { edge:'e-freeze', node:'freeze', tone:'go', msg:`plan submitted · <b>P2.5 FREEZE</b> · intent review ${S.freezeRejections + 1}/${S.maxIteration}` }; } },
+
+  plan_ok: { label:'intent: DONE', note:'plan matches the user\'s intent', tone:'go', from:['freeze'],
+    run(){ S.phase='act'; S.freezeRejections=0; S.frozenPrompt='## Outcome …\\n## Verification …\\n## Constraints …\\n## Code Quality Requirements …';
       S.frozenHash = hex(64);
-      return { edge:'e-freeze', node:'act', tone:'go', msg:'plan frozen · hashed · archived · <b>todo:replace</b> (5 items)' }; } },
+      return { edge:'e-plan-ok', node:'act', tone:'go', msg:'approved · plan frozen · hashed · archived · <b>todo:replace</b> (5 items) · <b>P3 ACT</b>' }; } },
+
+  plan_reject: { label:'intent: changes / questions', note:'no tag emitted', tone:'bad', from:['freeze'],
+    run(){ S.freezeRejections++; S.phase='plan';
+      if (S.freezeRejections >= S.maxIteration){
+        return { edge:'e-plan-reject', node:'plan', tone:'bad', msg:`rejected · freezeRejections → <b>${S.freezeRejections}/${S.maxIteration}</b> · back to <b>PLAN</b> · <b>next freeze_plan skips the review</b>` }; }
+      return { edge:'e-plan-reject', node:'plan', tone:'bad', msg:`rejected · freezeRejections → <b>${S.freezeRejections}/${S.maxIteration}</b> · back to <b>PLAN</b> with the reasons` }; } },
+
+  plan_crash: { label:'intent review: no verdict', note:'timeout / crash · not counted', tone:'bad', from:['freeze'],
+    run(){ S.phase='plan';
+      return { edge:'e-plan-reject', node:'plan', tone:'bad', msg:'no verdict · <b>not counted</b> · back to <b>PLAN</b>' }; } },
+
+  plan_skip: { label:'freeze_plan() · budget spent', note:'freezeRejections ≥ maxIteration', tone:'go', from:['plan'],
+    run(){ S.phase='act'; S.freezeRejections=0; S.frozenPrompt='## Outcome …\\n## Verification …\\n## Constraints …\\n## Code Quality Requirements …';
+      S.frozenHash = hex(64);
+      return { edge:'e-plan-ok', node:'act', tone:'go', msg:'intent review <b>skipped</b> (budget exhausted) · plan frozen · <b>P3 ACT</b>' }; } },
 
   settle_continue: { label:'todo:settled = continue', note:'one fresh nudge sent', from:['act'],
     run(){ return { edge:'e-hold', node:'act', tone:'sys', msg:'incomplete list · nudged once → stay in <b>ACT</b>' }; } },
@@ -652,7 +685,7 @@ const E = {
       return { edge:'e-reject', node:'act', tone:'amber',
         msg:`rejected as rubber-stamp · <b>no extra charge</b> (${S.reviewsCompleted}/${S.maxIteration}) · back to <b>ACT</b>` }; } },
 
-  abort: { label:'/gated-goal-exit', note:'manual abort', tone:'bad', from:['plan','act','review','verify'],
+  abort: { label:'/gated-goal-exit', note:'manual abort', tone:'bad', from:['plan','freeze','act','review','verify'],
     run(){ exit('aborted by user');
       return { edge:'e-manual', node:'aborted', tone:'bad', msg:'manual abort · <b>exit: aborted by user</b>' }; } }
 };
@@ -712,11 +745,11 @@ function paint(live){
   }
   $('phaseRead').textContent =
     `phase — ${S.phase}${S.exitReason ? ` · ${S.exitReason}` : ''}`;
-  $('runTag').textContent = running() ? `active · ${S.reviewsCompleted}/${S.maxIteration}` : (S.exitReason || 'stopped');
+  $('runTag').textContent = running() ? `active · ${S.reviewsCompleted}/${S.maxIteration}${S.freezeRejections ? ` · freeze rejections ${S.freezeRejections}` : ''}` : (S.exitReason || 'stopped');
 }
 
 let prevJson = null;               // null = first paint, nothing flashes
-const ORDER = ['phase','maxIteration','reviewsCompleted','reviewerModel','reviewerPermissions',
+const ORDER = ['phase','maxIteration','reviewsCompleted','freezeRejections','reviewerModel','reviewerPermissions',
                'frozenPrompt','frozenHash','startedAt','originalCwd','exitReason'];
 function renderJson(){
   const view = {};
@@ -905,9 +938,10 @@ function reset(){
 
 /* ═══ scenarios ════════════════════════════════════════ */
 const SCEN = {
-  'happy path': { max:10, steps:['start','ping_ok','freeze_plan','settle_continue','settle_review','review_done','confirm_done'] },
-  'rubber-stamp caught': { max:3, steps:['start','ping_ok','freeze_plan','settle_review','review_done','reject_done','settle_review','review_done','confirm_done'] },
-  'budget exhausted': { max:2, steps:['start','ping_ok','freeze_plan','settle_review','review_changes','settle_wait','settle_review','review_changes'] },
+  'happy path': { max:10, steps:['start','ping_ok','freeze_plan','plan_ok','settle_continue','settle_review','review_done','confirm_done'] },
+  'ambiguous plan': { max:2, steps:['start','ping_ok','freeze_plan','plan_reject','freeze_plan','plan_reject','freeze_plan','plan_skip','settle_review','review_done','confirm_done'] },
+  'rubber-stamp caught': { max:3, steps:['start','ping_ok','freeze_plan','plan_ok','settle_review','review_done','reject_done','settle_review','review_done','confirm_done'] },
+  'budget exhausted': { max:2, steps:['start','ping_ok','freeze_plan','plan_ok','settle_review','review_changes','settle_wait','settle_review','review_changes'] },
   'cold reviewer': { max:10, steps:['start','ping_fail'] }
 };
 function play(name){

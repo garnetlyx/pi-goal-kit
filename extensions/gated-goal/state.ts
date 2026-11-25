@@ -13,12 +13,17 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export type Phase = "idle" | "plan" | "act" | "review" | "verify";
+/** `freeze` is P2.5: the intent reviewer is auditing the plan the agent wants to freeze. */
+export type Phase = "idle" | "plan" | "freeze" | "act" | "review" | "verify";
 
 export interface GatedGoalState {
 	phase: Phase;
 	maxIteration: number;
 	reviewsCompleted: number;
+	/** Consecutive plan rejections by the intent reviewer (P2.5). Capped by
+	 *  maxIteration like reviewsCompleted, but counted separately and never
+	 *  charged to it; reset when a plan is frozen. */
+	freezeRejections: number;
 	reviewerModel: string; // "provider/modelId"
 	reviewerPermissions: string[];
 	frozenPrompt: string; // outcome + verification + constraints + quality
@@ -36,6 +41,7 @@ const EMPTY: GatedGoalState = {
 	phase: "idle",
 	maxIteration: DEFAULT_MAX_ITERATION,
 	reviewsCompleted: 0,
+	freezeRejections: 0,
 	reviewerModel: "",
 	reviewerPermissions: REVIEWER_PERMISSIONS,
 	frozenPrompt: "",

@@ -1,13 +1,13 @@
 ---
 name: gated-goal
-description: Use when the user invokes /gated-goal to start a plan-act-review loop with a frozen, hash-checked plan and an independent reviewer subagent that gates completion. Five phases — select reviewer, plan (freeze), act (work todos), review (reviewer checks against the frozen plan), verify (you re-run the verification yourself). The loop repeats until you confirm completion or max-iteration is reached.
+description: Use when the user invokes /gated-goal to start a plan-act-review loop with a frozen, hash-checked plan and an independent reviewer subagent that gates completion. Six phases — select reviewer, plan, freeze (the reviewer audits your plan against the conversation), act (work todos), review (reviewer checks against the frozen plan), verify (you re-run the verification yourself). The loop repeats until you confirm completion or max-iteration is reached.
 ---
 
 # Gated-goal mode
 
-A five-phase workflow that gates task completion behind an independent review
-against a frozen plan, plus your own verification pass. Started by the user
-with `/gated-goal`.
+A six-phase workflow that gates task completion behind an independent review
+against a frozen plan, plus your own verification pass — and gates the freezing
+of that plan behind the same reviewer. Started by the user with `/gated-goal`.
 
 ## Starting
 
@@ -37,8 +37,26 @@ Discuss the goal with the user until they explicitly confirm. Then call
 - `todos` — work items. These **replace** your todo list, so include everything
   ACT needs and do not re-add them afterwards.
 
-`freeze_plan` hashes the plan and enters ACT. **Only call it after explicit
-user confirmation.** The frozen prompt is immutable for the rest of the run.
+`freeze_plan` submits the plan to the intent reviewer (next phase) and, once
+approved, hashes it and enters ACT. **Only call it after explicit user
+confirmation.** The frozen prompt is immutable for the rest of the run.
+
+### P2.5 — freeze (intent review)
+The reviewer reads this session's transcript and audits the plan against what
+the user actually asked for: does it add anything they did not ask for, drop
+anything they did, or silently decide something that still needs their answer?
+
+- **Approved** → the plan is frozen and you are in ACT.
+- **Rejected** → `freeze_plan` returns an error with the reviewer's reasons
+  (intent mismatches, questions to ask the user) and you are back in P2.
+  Relay the questions to the user in your own words, adjust the plan to their
+  answers, then call `freeze_plan` again. Re-submitting an unchanged plan does
+  not help: the reviewer rejects it again and every rejection counts.
+- After `maxIteration` consecutive rejections the error says the **next**
+  `freeze_plan` call skips the review. That is the loop's safety valve, not a
+tactic to aim for.
+- A review that timed out or could not run is not a rejection: tell the user
+  what happened before trying again.
 
 ### P3 — act
 Work the todos (they are already there — freeze_plan created them). The frozen
@@ -100,7 +118,9 @@ exit is discarded — the loop cannot resurrect itself after an abort.
 
 If Pi restarts mid-review, that review's verdict never landed: it is **not
 charged**, you are flipped back to ACT and told so. Re-present your completion
-summary and stop — a fresh review runs automatically.
+summary and stop — a fresh review runs automatically. The same applies to an
+intent review that was in flight: you are back in PLAN, nothing counted —
+call `freeze_plan` again.
 
 ## Notes
 

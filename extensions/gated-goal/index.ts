@@ -1,5 +1,5 @@
 /**
- * Gated-goal mode: a five-phase workflow that forces plan → act → review →
+ * Gated-goal mode: a six-phase workflow that forces plan → act → review →
  * verify loops until a frozen plan is satisfied or max-iteration is hit.
  *
  *   /gated-goal [maxIteration] [reviewerModel]
@@ -8,8 +8,13 @@
  *   picker, or esc = main model), then ping it with "reply ok". Failure → abort
  *   (a start-over has already torn the previous gate down at confirm time).
  * P2 plan            — discuss with user; agent calls freeze_plan with the four
- *   sections + todos. Frozen prompt + hash persisted; the todo list is replaced
- *   wholesale with the frozen items (todo:replace event); → P3.
+ *   sections + todos.
+ * P2.5 freeze        — the reviewer reads the session transcript and audits the
+ *   plan against the user's intent (mismatches, open ambiguities). Rejected →
+ *   back to P2 with the reasons; after maxIteration consecutive rejections the
+ *   next freeze skips the review. Approved → frozen prompt + hash persisted,
+ *   the todo list is replaced wholesale with the frozen items (todo:replace
+ *   event); → P3.
  * P3 act             — todo owns the agent_settled decision: a fresh incomplete
  *   list gets one continuation nudge, an active external wait stays in P3, and
  *   every settle with no scheduled continuation enters P4.
@@ -49,6 +54,7 @@ import {
 	save,
 } from "./state.ts";
 import { pingReviewer, runReview, cancelActiveReviewer } from "./reviewer.ts";
+import { runIntentReview } from "./plan-review.ts";
 import { availableModels } from "../subagent/models.ts";
 import { pickModel } from "../subagent/model-picker.ts";
 import {
@@ -91,7 +97,7 @@ export default function (pi: ExtensionAPI) {
 	}));
 
 	// In-memory mirror of persisted state; reloaded on session_start.
-	let state: GatedGoalState = { phase: "idle", maxIteration: DEFAULT_MAX_ITERATION, reviewsCompleted: 0, reviewerModel: "", reviewerPermissions: REVIEWER_PERMISSIONS, frozenPrompt: "", frozenHash: "", startedAt: 0, originalCwd: "" };
+	let state: GatedGoalState = { phase: "idle", maxIteration: DEFAULT_MAX_ITERATION, reviewsCompleted: 0, freezeRejections: 0, reviewerModel: "", reviewerPermissions: REVIEWER_PERMISSIONS, frozenPrompt: "", frozenHash: "", startedAt: 0, originalCwd: "" };
 	let ready = false;
 
 	// Epoch latch for async continuations. Every authoritative transition (exit,
@@ -145,6 +151,16 @@ export default function (pi: ExtensionAPI) {
 			setStatus(ctx, "recovering");
 			pi.sendUserMessage(
 				`⚠️ Review ${state.reviewsCompleted + 1}/${state.maxIteration} was interrupted by a restart before it returned a verdict — its feedback is lost and no iteration was charged. Back in ACT. If all work is complete, present your completion summary and stop — a fresh review will run automatically.`,
+				{ deliverAs: "followUp" },
+			);
+		} else if (state.phase === "freeze") {
+			// The intent reviewer's verdict died with the previous process: not a
+			// rejection, so nothing is counted. Back to PLAN; the agent re-submits.
+			state.phase = "plan";
+			save(ctx, state);
+			setStatus(ctx);
+			pi.sendUserMessage(
+				`⚠️ The intent review of your freeze attempt (${state.freezeRejections + 1}/${state.maxIteration}) was interrupted by a restart before it returned a verdict — not charged. Back in PLAN. Call freeze_plan again to re-run the review.`,
 				{ deliverAs: "followUp" },
 			);
 		}
@@ -375,6 +391,7 @@ export default function (pi: ExtensionAPI) {
 				phase: "plan",
 				maxIteration,
 				reviewsCompleted: 0,
+				freezeRejections: 0,
 				reviewerModel,
 				reviewerPermissions: REVIEWER_PERMISSIONS,
 				frozenPrompt: "",
@@ -400,12 +417,45 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ---- freeze_plan tool (P2 → P3) ----
+	// ---- freeze_plan tool (P2 → P2.5 → P3) ----
+	// Freezing is the only exit from PLAN, and it is gated twice: by the user's
+	// explicit confirmation (the agent's duty) and by the intent reviewer, who
+	// reads the session transcript and audits the plan against what the user
+	// actually asked for (P2.5). A rejected plan returns to PLAN with the
+	// reviewer's reasons; after maxIteration consecutive rejections the next
+	// freeze skips the review, so the loop can never park the gate.
+	const freeze = (ctx: ExtensionContext, params: { todos: { text: string; status?: "todo" | "pending" | "done" }[] }, frozenPrompt: string) => {
+		state.frozenPrompt = frozenPrompt;
+		state.frozenHash = hashPrompt(frozenPrompt);
+		state.phase = "act";
+		save(ctx, state);
+		// Archive the plan in the session too. The state file under the agent
+		// dir is then no longer the only copy, so a prompt that no longer
+		// matches its hash can be recovered instead of merely flagged.
+		pi.appendEntry(FROZEN_ENTRY, { prompt: frozenPrompt, hash: state.frozenHash });
+		setStatus(ctx, "acting");
+
+		// Land the todo list ourselves instead of asking the agent to type it
+		// out: it usually has its own list from the PLAN discussion already,
+		// and "now add these" appends to it, producing duplicate work and
+		// misleading progress.
+		const replace: TodoReplaceEvent = { source: "gated-goal", items: params.todos, ctx };
+		pi.events.emit(TODO_REPLACE_EVENT, replace);
+
+		const todoLines = params.todos
+			.map((t, i) => `  ${i + 1}. ${t.text}`)
+			.join("\n");
+		pi.sendUserMessage(
+			`📋 Plan frozen (sha256 ${state.frozenHash.slice(0, 12)}…). Your todo list has been replaced with the frozen one (${params.todos.length} item(s)) — do NOT add them again:\n${todoLines}\n\nStart ACTING. Mark items done as you finish them. When work is complete, stop with an all-done or cleared list; todo will nudge once for fresh incomplete work, and review starts when no continuation is scheduled.`,
+			{ deliverAs: "followUp" },
+		);
+	};
+
 	pi.registerTool({
 		name: "freeze_plan",
 		label: "Freeze gated-goal plan",
 		description: [
-			"Gated-goal PLAN phase only. Freezes the agreed plan into an immutable review prompt (hashed) and REPLACES the todo list with the work items given here, then enters ACT phase.",
+			"Gated-goal PLAN phase only. Submits the agreed plan to the intent reviewer, who audits it against the conversation with the user (intent match, open ambiguities). Approved: the plan is frozen into an immutable review prompt (hashed), the todo list is REPLACED with the work items given here, and ACT begins. Rejected: the tool returns the reviewer's reasons — discuss them with the user, then call it again.",
 			"Only call after the user has explicitly confirmed the plan. Provide all four sections and the todo list.",
 		].join("\n"),
 		parameters: Type.Object({
@@ -426,31 +476,60 @@ export default function (pi: ExtensionAPI) {
 				return { content: [{ type: "text", text: "freeze_plan requires at least one non-blank todo before entering ACT." }], details: {}, isError: true };
 			}
 			const frozenPrompt = buildFrozenPrompt(params);
+
+			// Budget exhausted by consecutive rejections: the review is skipped so
+			// the gate moves on, and the user is told.
+			if (state.freezeRejections >= state.maxIteration) {
+				const used = state.freezeRejections;
+				ctx.ui.notify(`Intent review skipped — ${used}/${state.maxIteration} rejections used. Freezing as proposed.`, "warning");
+				state.freezeRejections = 0;
+				freeze(ctx, params, frozenPrompt);
+				return { content: [{ type: "text", text: `Frozen (intent review skipped: ${used}/${state.maxIteration} rejections used). phase=act, hash=${state.frozenHash.slice(0, 12)}…` }], details: {} };
+			}
+
+			const attempt = state.freezeRejections + 1;
+			const myEpoch = gateEpoch;
+			state.phase = "freeze";
 			state.frozenPrompt = frozenPrompt;
 			state.frozenHash = hashPrompt(frozenPrompt);
-			state.phase = "act";
 			save(ctx, state);
-			// Archive the plan in the session too. The state file under the agent
-			// dir is then no longer the only copy, so a prompt that no longer
-			// matches its hash can be recovered instead of merely flagged.
-			pi.appendEntry(FROZEN_ENTRY, { prompt: frozenPrompt, hash: state.frozenHash });
-			setStatus(ctx, "acting");
+			setStatus(ctx, `intent review ${attempt}/${state.maxIteration}`);
 
-			// Land the todo list ourselves instead of asking the agent to type it
-			// out: it usually has its own list from the PLAN discussion already,
-			// and "now add these" appends to it, producing duplicate work and
-			// misleading progress.
-			const replace: TodoReplaceEvent = { source: "gated-goal", items: params.todos, ctx };
-			pi.events.emit(TODO_REPLACE_EVENT, replace);
+			const outcome = await runIntentReview(pi, ctx, state, frozenPrompt, attempt);
 
-			const todoLines = params.todos
-				.map((t, i) => `  ${i + 1}. ${t.text}`)
-				.join("\n");
-			pi.sendUserMessage(
-				`📋 Plan frozen (sha256 ${state.frozenHash.slice(0, 12)}…). Your todo list has been replaced with the frozen one (${params.todos.length} item(s)) — do NOT add them again:\n${todoLines}\n\nStart ACTING. Mark items done as you finish them. When work is complete, stop with an all-done or cleared list; todo will nudge once for fresh incomplete work, and review starts when no continuation is scheduled.`,
-				{ deliverAs: "followUp" },
-			);
-			return { content: [{ type: "text", text: `Frozen. phase=act, hash=${state.frozenHash.slice(0, 12)}…` }], details: {} };
+			// Exit / restart / session switch while the intent reviewer ran: this
+			// call no longer owns the gate. Nothing is frozen, nothing is written.
+			if (gateEpoch !== myEpoch) {
+				return { content: [{ type: "text", text: "freeze_plan aborted: the gate changed during the intent review (exit, restart or session switch). Nothing was frozen." }], details: {}, isError: true };
+			}
+
+			if (outcome.kind === "approved") {
+				state.freezeRejections = 0;
+				freeze(ctx, params, frozenPrompt);
+				return { content: [{ type: "text", text: `Frozen — the intent reviewer approved the plan (attempt ${attempt}). phase=act, hash=${state.frozenHash.slice(0, 12)}…` }], details: {} };
+			}
+
+			state.phase = "plan";
+			if (outcome.kind === "rejected") state.freezeRejections = attempt;
+			save(ctx, state);
+
+			if (outcome.kind === "rejected") {
+				setStatus(ctx, `freeze rejected ${attempt}/${state.maxIteration}`);
+				ctx.ui.notify(`freeze_plan rejected by the intent reviewer (${attempt}/${state.maxIteration})`, "warning");
+				return { content: [{ type: "text", text:
+					`NOT frozen — the intent reviewer rejected this plan (rejection ${attempt}/${state.maxIteration}).\n\n${outcome.output}\n\nDiscuss each point with the user, adjust the plan to their answers, then call freeze_plan again.` +
+					(attempt >= state.maxIteration ? `\n\nBudget exhausted: this was rejection ${attempt}/${state.maxIteration}. The NEXT freeze_plan call will skip the intent review and go straight to ACT.` : "")
+				}], details: {}, isError: true };
+			}
+
+			// Not a verdict (child timed out, crashed, was cancelled) or the review
+			// could not run at all: not counted, and the gate is never left in
+			// freeze. The agent must tell the user before retrying.
+			setStatus(ctx);
+			const why = outcome.kind === "notVerdict"
+				? `did not return a verdict (${outcome.status}). ${outcome.output.slice(0, 400)}`
+				: `could not run (${outcome.message})`;
+			return { content: [{ type: "text", text: `NOT frozen — the intent review ${why}; not counted against the freeze budget. Tell the user before calling freeze_plan again.` }], details: {}, isError: true };
 		},
 	});
 
@@ -520,7 +599,11 @@ export default function (pi: ExtensionAPI) {
 		description: "Show current gated-goal state",
 		handler: async (_args, ctx) => {
 			ctx.ui.notify(
-				state.phase === "idle" ? "gated-goal idle" : `phase=${state.phase} reviews=${state.reviewsCompleted}/${state.maxIteration} reviewer=${state.reviewerModel}`,
+				state.phase === "idle"
+					? "gated-goal idle"
+					: `phase=${state.phase} reviews=${state.reviewsCompleted}/${state.maxIteration}` +
+					  (state.phase === "plan" || state.phase === "freeze" ? ` freeze-rejections=${state.freezeRejections}/${state.maxIteration}` : "") +
+					  ` reviewer=${state.reviewerModel}`,
 				"info",
 			);
 		},

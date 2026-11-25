@@ -1,14 +1,19 @@
 # Gated-goal
 
-A five-phase workflow that gates task completion behind an independent reviewer
+A six-phase workflow that gates task completion behind an independent reviewer
 subagent AND a main-agent verification pass, both checking work against a
-frozen, hashed plan. Started by `/gated-goal [maxIteration] [reviewerModel]`.
+frozen, hashed plan — and gates the freezing of that plan itself behind the
+same reviewer, which audits it against the conversation with the user. Started
+by `/gated-goal [maxIteration] [reviewerModel]`.
 
 The double gate exists because a reviewer subagent can rubber-stamp (approve
 without actually running verification). The main agent's own verification pass
-is the final arbiter.
+is the final arbiter. The freeze loop (P2.5) exists because a plan that
+misreads the user's intent gets executed, reviewed and verified flawlessly —
+against the wrong goal; the only point where that can be caught is before the
+plan becomes immutable, with the user still in the conversation.
 
-## Why five phases
+## Why six phases
 
 The first version had four (plan → act → review → done) and trusted the
 reviewer's `<promise>DONE</promise>`. End-to-end testing exposed the hole: a
@@ -16,6 +21,13 @@ local reviewer model emitted DONE without running the verification command,
 approving work that provably failed the frozen verification. The VERIFY phase
 makes the main agent re-run the verification itself and subjectively judge the
 real output before closing the loop.
+
+The freeze loop was added for the same reason one step earlier: the frozen
+plan is the standard everything downstream is checked against, so a plan that
+adds work the user never asked for, drops what they did, or silently decides
+an open question makes every later phase correct about the wrong thing. The
+reviewer reads the session transcript and either approves the plan or sends
+the agent back to the user with concrete questions.
 
 ## State machine
 
@@ -29,14 +41,35 @@ idle ──/gated-goal [N] [model]──► P1 select reviewer
                                    │ ping "reply ok" (config: pingTimeoutSec)
                                    ├─ fail ─► abort to idle (nothing left active)
                                    ▼
-                                 P2 plan
-                                   │ agent + user align on goal
-                                   │ agent calls freeze_plan(outcome, verification,
-                                   │   constraints, quality, todos)
-                                   │ → frozen prompt hashed + persisted
-                                   │   (+ archived as a session entry)
-                                   │ → todo list REPLACED with the frozen
-                                   │   items (todo:replace event)
+                                 P2 plan  ◄──────────────────┐
+                                   │ agent + user align on   │
+                                   │   goal; agent calls     │
+                                   │   freeze_plan(outcome,  │
+                                   │   verification,         │
+                                   │   constraints, quality, │
+                                   │   todos)                │
+                                   ▼                         │
+                                 P2.5 freeze                 │
+                                   │ reviewer reads the      │
+                                   │   session transcript    │
+                                   │   and audits the plan:  │
+                                   │   intent match? open    │
+                                   │   ambiguities?          │
+                                   │ freezeRejections >=     │
+                                   │   maxIter → skip to P3  │
+                                   │ line starting with      │
+                                   │ <promise>DONE</promise>?│
+                                   │   ├─ no (verdict) ──────┘
+                                   │   │    back to P2 with the
+                                   │   │    reasons; counter++
+                                   │   ├─ no verdict (timeout/
+                                   │   │   crash) → P2, not counted
+                                   │   └─ yes → frozen prompt hashed
+                                   │       + persisted (+ archived
+                                   │       as a session entry)
+                                   │       → todo list REPLACED with
+                                   │       the frozen items
+                                   │       (todo:replace event)
                                    ▼
                                  P3 act  ◄───────────────────┐
                                    │ agent works the todos   │
@@ -81,8 +114,9 @@ manual `/gated-goal-exit`.
 | Path | Purpose |
 |------|---------|
 | `extensions/gated-goal/index.ts` | `/gated-goal`, `/gated-goal-exit`, `/gated-goal-status` commands; `freeze_plan`, `confirm_done`, `reject_done` tools; consumes todo's P3→P4 settle disposition; `extractSection` helper |
-| `extensions/gated-goal/reviewer.ts` | `pingReviewer` (P1 connectivity probe) + `runReview` (P4 spawn with hash verify + promise parse) |
-| `extensions/gated-goal/state.ts` | load/save the session state file; phase types (`idle|plan|act|review|verify`); frozen-prompt hashing; integrity check |
+| `extensions/gated-goal/plan-review.ts` | P2.5: `renderTranscript` (session branch → text), `writeTranscript` (0600 temp file), `runIntentReview` (transcript → reviewer → transcript deleted; classifies the outcome, never throws) |
+| `extensions/gated-goal/reviewer.ts` | reviewer prompts (`buildReviewerSystemPrompt`, `buildIntentReviewPrompt`, `deadlineNotice`), the shared child spawn, `pingReviewer` (P1 probe), `runReview` (P4), `runPlanReview` (P2.5), `isApproved`, `cancelActiveReviewer` |
+| `extensions/gated-goal/state.ts` | load/save the session state file; phase types (`idle|plan|freeze|act|review|verify`); frozen-prompt hashing; integrity check |
 | `extensions/gated-goal/SKILL.md` | agent-facing phase guide |
 
 ## Persisted state (`<agent dir>/gated-goal/sessions/<sessionId>/state.json`)
@@ -92,9 +126,10 @@ hardcoded, since it differs between a stock install and a bundled one.
 
 ```json
 {
-  "phase": "idle | plan | act | review | verify",
+  "phase": "idle | plan | freeze | act | review | verify",
   "maxIteration": 10,
   "reviewsCompleted": 0,
+  "freezeRejections": 0,
   "reviewerModel": "provider/modelId",
   "reviewerPermissions": ["read", "grep", "find", "ls", "bash"],
   "frozenPrompt": "## Outcome\n...\n## Verification\n...\n## Constraints\n...\n## Code Quality Requirements\n...",
@@ -105,6 +140,9 @@ hardcoded, since it differs between a stock install and a bundled one.
 ```
 
 - `phase` drives every transition; todo's settle event, `agent_settled` in VERIFY, and the tools branch on it.
+- `freezeRejections` counts consecutive P2.5 rejections of the plan; the cap is
+  `maxIteration` (same value, separate counter, never charged to
+  `reviewsCompleted`); reset when a plan is frozen.
 - `reviewsCompleted` increments once per completed review, on either verdict, so
   both kinds of "this iteration didn't close the loop" consume budget
   symmetrically. See [Iteration accounting](#iteration-accounting).
@@ -165,13 +203,18 @@ so the agent re-presents completion; todo's next `review` disposition then
 starts a fresh cycle. It deliberately does not re-spawn the reviewer itself —
 opening a session must not launch a review process on its own.
 
+A state file found in `freeze` is the same situation one step earlier: the
+intent review died with the process, so nothing was decided and nothing was
+charged. The handler flips to `plan` (the counter is kept) and sends a
+follow-up telling the agent to call `freeze_plan` again so the review re-runs.
+
 ## Commands
 
 | Command | Effect |
 |---------|--------|
 | `/gated-goal [maxIteration] [reviewerModel]` | Start. If already active, asks to abort+restart; confirming tears the old gate down at once (persisted idle, reviewer killed), so a failed ping leaves nothing active. Resolves reviewer model (arg → searchable picker → esc=main), pings it, enters P2. |
 | `/gated-goal-exit` | Manual abort. Exits with reason "aborted by user". |
-| `/gated-goal-status` | Notify current phase / iteration / reviewer. |
+| `/gated-goal-status` | Notify current phase / iteration / reviewer; in `plan` and `freeze` also `freeze-rejections=K/M`. |
 
 ### Arg parsing
 
@@ -215,26 +258,49 @@ configured window to first token will falsely fail — raise
 
 ## Tools
 
-### `freeze_plan` (P2 → P3)
+### `freeze_plan` (P2 → P2.5 → P3)
 
 Parameters: `outcome`, `verification`, `constraints`, `quality` (all strings),
 plus `todos` (non-empty array of `{text, status?}` with non-blank text).
 
-- Builds the canonical frozen prompt via `buildFrozenPrompt` (four `## Section`
-  blocks, deterministic order, what `extractSection` later parses).
-- Hashes it (`hashPrompt`, sha256), stores both in state.
-- Flips `phase` to `act`, persists.
-- Archives `{prompt, hash}` as a `gated-goal-frozen` session entry
-  (`pi.appendEntry`) — a second store the integrity check can recover from.
-- Rejects an empty array or any blank todo before changing state.
-- Emits `todo:replace` with the frozen items, which **replaces** the todo list
-  wholesale (see `extensions/todo/snapshot.ts`). Asking the model to add them
-  instead appended to whatever it had already written down during PLAN, so a
-  freeze routinely doubled the work list.
-- Sends a followUp confirming the list and telling the agent to start acting
-  without re-adding anything.
+Only valid while `phase === "plan"`. Elsewhere returns isError (so a second
+call while a freeze review is in flight is refused too). An empty array or any
+blank todo is rejected before state changes.
 
-Only valid while `phase === "plan"`. Elsewhere returns isError.
+**Budget exhausted** (`freezeRejections >= maxIteration`): the intent review is
+skipped with a warning notify and the plan freezes as proposed, so the loop can
+never park the gate; the result text says the review was skipped.
+
+Otherwise the call enters the freeze review:
+
+- Persists `phase: "freeze"` with the proposed prompt + hash, status
+  `intent review K/M` (K = `freezeRejections + 1`).
+- `runIntentReview` renders the session's current branch to a 0600 file in the
+  OS temp dir, spawns the reviewer (`runPlanReview`: same model, window,
+  permissions and `<promise>DONE</promise>` protocol as a work review, prompt
+  = `buildIntentReviewPrompt`) and deletes the transcript afterwards.
+- If the gate changed meanwhile (exit, restart, session switch — detected via
+  the epoch latch), returns isError and writes nothing.
+- **Approved** → `freezeRejections = 0`, then the freeze itself: canonical
+  prompt (`buildFrozenPrompt`) hashed and stored, `phase: "act"`, archived as
+  a `gated-goal-frozen` session entry (`pi.appendEntry`, the second store the
+  integrity check can recover from), `todo:replace` with the frozen items
+  (**replaces** the list wholesale — asking the model to add them appended to
+  its own PLAN list and routinely doubled the work), and a followUp telling
+  the agent to start acting without re-adding anything.
+- **Rejected** → `phase: "plan"`, `freezeRejections = K`, status
+  `freeze rejected K/M`, warning notify, and an isError result carrying the
+  reviewer's text plus the instruction to discuss each point with the user
+  before calling again. When K reaches M the result also states that the
+  **next** call skips the review.
+- **No verdict** (child timed out, crashed, was cancelled) or the review could
+  not run at all (transcript I/O, spawn, config) → `phase: "plan"`, nothing
+  counted, isError telling the agent to inform the user before retrying. The
+  gate is never left in `freeze`.
+
+Nothing forces a user turn between a rejection and the next call: the intent
+reviewer is told to reject again when the transcript shows the user has not
+addressed the earlier issues, and the cap bounds the ping-pong.
 
 ### `confirm_done` (P5 → exit done)
 
@@ -269,15 +335,19 @@ stops would park the loop there for good.
 
 ## Reviewer (`reviewer.ts`)
 
-`runReview` and `pingReviewer` both reuse the subagent stack
-(`scheduler.ts` registry + `runner.ts` `runChild`). Each reviewer:
+`runReview`, `runPlanReview` and `pingReviewer` all reuse the subagent stack
+(`scheduler.ts` registry + `runner.ts` `runChild`) through one shared spawn
+(`spawnReviewer`); the two reviews differ only in prompt and task. Each
+reviewer:
 
 - is added to the registry → appears in `/subagents` with role `"reviewer"`
+  (`reviewer-N` for work reviews, `plan-reviewer-N` for intent reviews)
 - emits `wait:active` on registry add, `wait:done` in a `finally` → the todo
   extension's nudge stays silent while a review runs
 - is cancellable: `cancelActiveReviewer()` (same mechanics as
-  `dispatch_cancel`) kills the in-flight child; `exitGate` and `/gated-goal`
-  start-over call it so a dead gate does not keep a doomed review running
+  `dispatch_cancel`) kills the in-flight child; `teardownGate` (exit and
+  `/gated-goal` start-over) calls it so a dead gate does not keep a doomed
+  review running
 - spawns with `PI_SUBAGENT_CHILD=1` (set by `runChild`) → **cannot dispatch**
 - uses `reviewerPermissions` = read/grep/find/ls/bash
 - runs with `--no-context-files` (`contextFiles: false` → `runChild`), so the
@@ -392,6 +462,15 @@ same reason.
 `maxIteration = N` therefore permits up to N reviews, each of which can reach
 VERIFY.
 
+### Freeze budget (P2.5)
+
+`freezeRejections` is charged in exactly one place: a finished intent review
+that did not approve. A timed-out, crashed or cancelled intent reviewer, or a
+review that could not run at all, charges nothing — the same rule as for work
+reviews. Once `freezeRejections` reaches `maxIteration`, the next `freeze_plan`
+call skips the review and freezes as proposed. The two counters never touch:
+plan rejections are not review iterations, and a frozen plan resets them to 0.
+
 ## Cross-extension cooperation
 
 Gated-goal composes the three earlier extensions:
@@ -408,9 +487,9 @@ Gated-goal composes the three earlier extensions:
 ## Footer status
 
 `setStatus("gated-goal", …)` shows `gated-goal[phase] reviews/max` while
-active, plus a phase hint (`acting`, `reviewing`, `verifying`,
-`iteration N`). Cleared on exit. Refreshed on `session_start` and
-`agent_settled`.
+active, plus a phase hint (`planning`, `intent review K/M`, `acting`,
+`reviewing`, `verifying`, `iteration N`, `freeze rejected K/M`). Cleared on
+exit. Refreshed on `session_start` and `agent_settled`.
 
 ## Known limitations / trade-offs
 
@@ -436,3 +515,9 @@ active, plus a phase hint (`acting`, `reviewing`, `verifying`,
   reverse-check is "main agent's subjective judgment", not a parsed
   verification result. This is intentional for now — it raises the bar over
   trusting the reviewer without requiring a formal verifier.
+- **The intent review sees a rendered transcript, not the raw session.** User
+  and assistant prose is complete, tool traffic is compacted, and gate
+  follow-ups (which the session stores exactly like human input) can only be
+  described to the reviewer in the prompt, not marked in the data. Its verdict
+  is a model judgment; a reviewer that approves an ambiguous plan is caught
+  only by the user, who is in the conversation anyway.

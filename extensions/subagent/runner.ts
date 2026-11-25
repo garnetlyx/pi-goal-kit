@@ -67,11 +67,13 @@ export function createProcessTerminator(
 	};
 }
 
-async function writeTempPrompt(name: string, prompt: string): Promise<{ dir: string; file: string }> {
+/** A 0600 file in a fresh OS-temp dir for content a child process must read
+ *  (an appended system prompt, a rendered transcript). Caller removes the dir. */
+export async function writeTempFile(kind: string, name: string, content: string): Promise<{ dir: string; file: string }> {
 	const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
 	const safe = name.replace(/[^\w.-]+/g, "_");
-	const file = path.join(dir, `prompt-${safe}.md`);
-	await fs.promises.writeFile(file, prompt, { mode: 0o600 });
+	const file = path.join(dir, `${kind}-${safe}.md`);
+	await fs.promises.writeFile(file, content, { mode: 0o600 });
 	return { dir, file };
 }
 
@@ -129,7 +131,7 @@ export async function runChild(opts: {
 	let tmpDir: string | null = null;
 	let tmpFile: string | null = null;
 	if (systemPrompt && systemPrompt.trim()) {
-		const tmp = await writeTempPrompt(e.name, systemPrompt);
+		const tmp = await writeTempFile("prompt", e.name, systemPrompt);
 		tmpDir = tmp.dir;
 		tmpFile = tmp.file;
 		args.push("--append-system-prompt", tmpFile);
