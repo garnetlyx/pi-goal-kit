@@ -35,6 +35,7 @@ import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { Type } from "typebox";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { loadReminderConfig } from "./config.ts";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 
 /**
@@ -85,17 +86,14 @@ interface Reminder {
 
 const DEFAULT_POLL_SECONDS = 30;
 
-/** Every reminder carries a hard cap. A condition whose predicate never becomes
- *  true would otherwise wait forever — and reminders persist and re-arm on
- *  session_start, so the leak outlives the session that created it. Expiry is a
- *  wake-up, not a failure: the agent gets its own message flagged TIMEOUT and
- *  decides whether to re-arm or pivot. Overridable per call. */
-const DEFAULT_TIMEOUT_MINUTES = 120;
-
-/** Effective hard cap for a reminder: the caller's `timeout_minutes`, or the
- *  default. Exported for tests. */
-export function effectiveTimeoutMs(timeoutMinutes: number | undefined): number {
-	const minutes = timeoutMinutes != null && Number.isFinite(timeoutMinutes) && timeoutMinutes > 0 ? timeoutMinutes : DEFAULT_TIMEOUT_MINUTES;
+/** Effective hard cap for a reminder: the caller's `timeout_minutes`, else the
+ *  configured default (`reminder-hook.json`, see config.ts). A condition whose
+ *  predicate never becomes true would otherwise wait forever — and reminders
+ *  persist and re-arm on session_start, so the leak would outlive the session.
+ *  Expiry is a wake-up, not a failure: the agent gets its own message flagged
+ *  TIMEOUT and decides whether to re-arm or pivot. Exported for tests. */
+export function effectiveTimeoutMs(timeoutMinutes: number | undefined, defaultMinutes: number): number {
+	const minutes = timeoutMinutes != null && Number.isFinite(timeoutMinutes) && timeoutMinutes > 0 ? timeoutMinutes : defaultMinutes;
 	return minutes * 60_000;
 }
 
@@ -411,7 +409,7 @@ export default function (pi: ExtensionAPI) {
 			"",
 			"If only `at`/`in_minutes` is given (no condition), fires once at that time.",
 			"If both are given, waits until `at`, THEN starts polling `condition`.",
-			"`timeout_minutes` caps the wait; on timeout you get the message flagged as timeout. It defaults to 120 minutes, so no reminder waits forever.",
+			"`timeout_minutes` caps the wait; on timeout you get the message flagged as timeout. It defaults to `defaultTimeoutMinutes` in reminder-hook.json (shipped: 120), so no reminder waits forever.",
 		].join("\n"),
 		parameters: Type.Object({
 			message: Type.String({
@@ -437,7 +435,7 @@ export default function (pi: ExtensionAPI) {
 				Type.Number({ description: `Polling interval for condition. Default ${DEFAULT_POLL_SECONDS}s. Use a larger value for long waits (e.g. 300 for market open).` }),
 			),
 			timeout_minutes: Type.Optional(
-				Type.Number({ description: `Hard cap in minutes. If the wait exceeds this it fires with a timeout flag so you can bail or re-arm. Defaults to ${DEFAULT_TIMEOUT_MINUTES}; no reminder waits forever.` }),
+				Type.Number({ description: "Hard cap in minutes. If the wait exceeds this it fires with a timeout flag so you can bail or re-arm. Defaults to `defaultTimeoutMinutes` in reminder-hook.json (shipped: 120); no reminder waits forever." }),
 			),
 			label: Type.Optional(Type.String({ description: "Short human label for display/notification." })),
 		}),
@@ -461,7 +459,7 @@ export default function (pi: ExtensionAPI) {
 				when,
 				condition: params.condition,
 				pollSeconds: params.poll_seconds ?? DEFAULT_POLL_SECONDS,
-				timeoutMs: effectiveTimeoutMs(params.timeout_minutes),
+				timeoutMs: effectiveTimeoutMs(params.timeout_minutes, loadReminderConfig().defaultTimeoutMinutes),
 			};
 			addReminder(ctx, r);
 

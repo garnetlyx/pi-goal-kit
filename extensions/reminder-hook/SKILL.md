@@ -28,8 +28,9 @@ Parameters:
 - `at` *(optional)* — `"9:30"`, `"09:30:00"`, or ISO datetime. Time gate.
 - `in_minutes` *(optional)* — countdown gate in minutes.
 - `poll_seconds` *(optional)* — poll interval (default 30; use larger for long waits).
-- `timeout_minutes` *(optional, default 120)* — hard cap; fires flagged as timeout
-  so you can bail or re-arm. No reminder waits forever.
+- `timeout_minutes` *(optional)* — hard cap; fires flagged as timeout so you can
+  bail or re-arm. Defaults to `defaultTimeoutMinutes` in
+  `<agent dir>/reminder-hook.json` (shipped: 120). No reminder waits forever.
 - `label` *(optional)* — display label.
 
 Semantics:

@@ -71,7 +71,17 @@ Reminders are stored per session under
 re-arms every pending reminder. Pure-time reminders already due fire
 immediately on the next start. Timers are cleaned up on `session_shutdown`.
 
-Every reminder carries a hard cap (120 minutes by default, overridable per call).
+Every reminder carries a hard cap. `timeout_minutes` overrides it per call;
+otherwise `<agent dir>/reminder-hook.json` decides:
+
+```json
+{ "defaultTimeoutMinutes": 120 }
+```
+
+That file is optional — a missing or malformed one falls back to the shipped
+120 minutes, and a non-positive or non-finite value is ignored rather than
+removing the cap. It is read when a reminder is created, so an edit applies to
+the next reminder without a restart (same pattern as `websearch.json`).
 Without one, a predicate that never becomes true waits forever — and because
 reminders persist and re-arm on `session_start`, that leak outlives the session
 that created it. Expiry is a wake-up, not a failure: the agent receives its own
