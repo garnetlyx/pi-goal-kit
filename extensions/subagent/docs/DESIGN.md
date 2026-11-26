@@ -82,14 +82,32 @@ host must queue explicit extension follow-ups and resume them afterward.
 nested dispatch.
 
 Each dispatch emits at most one `wait:done`. Queue waits are cancellable and
-time-bounded. Session shutdown cancels queued, running, and hung entries.
+time-bounded. Session shutdown cancels queued, running, and hung entries and
+clears the registry, so the next session starts with no subagents.
 Cancellation escalates from SIGTERM to SIGKILL after the grace period.
 
 ## One registry per process, not per module
 
-`scheduler.ts` stores the registry under
-`Symbol.for("pi-goal-kit.subagent.registry.v1")` on `globalThis`, so subagent
-and gated-goal share one process-wide registry.
+`scheduler.ts` keeps the registry's *state* (entries, group slots, panel
+subscriptions) under `Symbol.for("pi-goal-kit.subagent.registry-state.v1")` on
+`globalThis`, so subagent and gated-goal share one process-wide registry. Only
+plain data lives there: every module instance wraps that state in its own
+`Registry`/`Semaphore`. Storing an *instance* instead would freeze the class
+identity of the process's first load — `/reload` re-reads the extension files,
+and the reloaded module would call its new methods on the old prototype
+(`registry.clear is not a function`). `/new` re-binds the already-loaded
+extension instances without re-reading the files; only `/reload` or a restart
+picks up edited code.
+
+The registry *object* is process-wide; its *entries* are session-scoped. Pi
+fires `session_shutdown` for the outgoing extension runtime on `/new`,
+`/resume`, `/fork`, and `/reload`, then loads fresh extension instances for the
+incoming session. The shutdown handler cancels live entries and calls
+`registry.clear()`, so `/subagents`, `dispatch_status`, and `dispatch_cancel`
+in the next session never list the previous session's subagents. Group slots
+survive the clear: the outgoing runtime's dispatch closures release into the
+same slot state, so the incoming session's same-group dispatch waits for a
+killed child to exit instead of oversubscribing the group.
 
 ## Files
 
@@ -233,8 +251,9 @@ still dispatches.
 All child output is untrusted; the main agent independently checks important
 files, commands, and facts.
 
-- Registry and child handles are in memory. `/reload` cancels live children;
-  completed history remains process-local and is not durable across restart.
+- Registry and child handles are in memory. Every session switch and `/reload`
+  cancels live children and clears the registry; history is not durable across
+  sessions or restarts.
 - Tool schemas (including `dispatch` parameters) are registered at session
   start and fixed for the session. `/reload` reloads extension code but does
   **not** refresh the main agent's view of tool schemas — changes to tool

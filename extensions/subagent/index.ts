@@ -242,7 +242,13 @@ export default function (pi: ExtensionAPI) {
 			try { e.kill?.(); } catch { /* ignore */ }
 			finishWait(e);
 		}
-		registry.changed();
+		// The registry object is process-wide (shared with gated-goal), but its
+		// entries belong to the runtime being torn down. Pi fires this for
+		// /new, /resume, /fork and /reload, then loads fresh extension
+		// instances for the next session; without the clear, that session's
+		// /subagents, dispatch_status and dispatch_cancel would keep listing
+		// this session's subagents until gc() aged them out.
+		registry.clear();
 	});
 
 	// ---------------- dispatch tool ----------------

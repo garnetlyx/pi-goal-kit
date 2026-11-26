@@ -6,9 +6,10 @@
  * semaphores shared across all dispatch invocations (so two rapid dispatch
  * calls can't bypass a group's limit).
  *
- * The registry instance is realm-scoped (Symbol.for), not module-scoped — see
- * the note above its export for why a plain module singleton silently splits
- * in two across extension entry points.
+ * The registry state is realm-scoped (Symbol.for), not module-scoped — see
+ * the note above `registry` for why a module-level singleton silently splits
+ * in two across extension entry points, and why only plain data may live
+ * on globalThis.
  */
 
 import type { Message } from "@earendil-works/pi-ai";
@@ -67,30 +68,42 @@ export interface DispatchEntry {
 
 // ---- Semaphore ------------------------------------------------------------
 
+/** Slot state of one resource group. Plain data on purpose: a reloaded module
+ *  instance wraps the same slots the torn-down runtime's dispatch closures
+ *  still release into (see the note above `registry`). */
+export interface SemaphoreState {
+	limit: number;
+	inUse: number;
+	waiters: Array<{ resolve: () => void; reject: (error: Error) => void; signal?: AbortSignal; onAbort?: () => void }>;
+}
+
+function freshSemaphoreState(limit: number): SemaphoreState {
+	return { limit: normalizedLimit(limit), inUse: 0, waiters: [] };
+}
+
 export class Semaphore {
-	private limit: number;
-	private inUse = 0;
-	private waiters: Array<{ resolve: () => void; reject: (error: Error) => void; signal?: AbortSignal; onAbort?: () => void }> = [];
-	constructor(limit: number) {
-		this.limit = normalizedLimit(limit);
+	private readonly state: SemaphoreState;
+	/** From a limit: standalone slots. From state: a wrapper over shared slots. */
+	constructor(state: SemaphoreState | number) {
+		this.state = typeof state === "number" ? freshSemaphoreState(state) : state;
 	}
 	setLimit(limit: number): void {
-		this.limit = normalizedLimit(limit);
+		this.state.limit = normalizedLimit(limit);
 		this.drain();
 	}
 	async acquire(signal?: AbortSignal): Promise<void> {
 		if (signal?.aborted) throw abortError();
-		if (this.inUse < this.limit) {
-			this.inUse++;
+		if (this.state.inUse < this.state.limit) {
+			this.state.inUse++;
 			return;
 		}
 		await new Promise<void>((resolve, reject) => {
 			const waiter = { resolve, reject, signal, onAbort: undefined as (() => void) | undefined };
-			this.waiters.push(waiter);
+			this.state.waiters.push(waiter);
 			if (signal) {
 				waiter.onAbort = () => {
-					const index = this.waiters.indexOf(waiter);
-					if (index >= 0) this.waiters.splice(index, 1);
+					const index = this.state.waiters.indexOf(waiter);
+					if (index >= 0) this.state.waiters.splice(index, 1);
 					reject(abortError());
 				};
 				signal.addEventListener("abort", waiter.onAbort, { once: true });
@@ -99,20 +112,20 @@ export class Semaphore {
 		});
 	}
 	release(): boolean {
-		if (this.inUse === 0) {
+		if (this.state.inUse === 0) {
 			console.warn("[subagent] ignored semaphore release without an acquired slot");
 			return false;
 		}
-		this.inUse--;
+		this.state.inUse--;
 		this.drain();
 		return true;
 	}
 	private drain(): void {
-		while (this.inUse < this.limit) {
-			const next = this.waiters.shift();
+		while (this.state.inUse < this.state.limit) {
+			const next = this.state.waiters.shift();
 			if (!next) return;
 			if (next.signal && next.onAbort) next.signal.removeEventListener("abort", next.onAbort);
-			this.inUse++;
+			this.state.inUse++;
 			next.resolve();
 		}
 	}
@@ -130,34 +143,44 @@ function abortError(): Error {
 
 // ---- Registry + Scheduler -------------------------------------------------
 
+/** Entries, group slots and panel subscriptions of the process. Plain data so
+ *  every module instance can wrap it (see `registry`). */
+interface RegistryState {
+	entries: Map<string, DispatchEntry>;
+	semaphores: Map<string, SemaphoreState>;
+	listeners: Set<() => void>;
+}
+
 class Registry {
-	private entries = new Map<string, DispatchEntry>();
-	private semaphores = new Map<string, Semaphore>();
-	private listeners = new Set<() => void>();
+	private readonly state: RegistryState;
+	constructor(state: RegistryState) {
+		this.state = state;
+	}
 
 	private emitChange(): void {
-		for (const listener of this.listeners) listener();
+		for (const listener of this.state.listeners) listener();
 	}
 	/** Subscribe to actual registry mutations (not an idle polling clock). */
 	subscribe(listener: () => void): () => void {
-		this.listeners.add(listener);
-		return () => this.listeners.delete(listener);
+		this.state.listeners.add(listener);
+		return () => this.state.listeners.delete(listener);
 	}
 	/** Notify observers after callers mutate a shared entry in place. */
 	changed(): void {
 		this.emitChange();
 	}
 
+	/** A wrapper over the group's shared slots; the limit follows the config. */
 	semaphoreFor(cfg: SubagentConfig, group: string): Semaphore {
 		const limit = concurrencyForGroup(cfg, group);
-		let s = this.semaphores.get(group);
-		if (!s) {
-			s = new Semaphore(limit);
-			this.semaphores.set(group, s);
-		} else {
-			s.setLimit(limit);
+		let slots = this.state.semaphores.get(group);
+		if (!slots) {
+			slots = freshSemaphoreState(limit);
+			this.state.semaphores.set(group, slots);
 		}
-		return s;
+		const semaphore = new Semaphore(slots);
+		semaphore.setLimit(limit);
+		return semaphore;
 	}
 
 	resolveGroup(cfg: SubagentConfig, provider: string, override?: string): string {
@@ -165,33 +188,43 @@ class Registry {
 	}
 
 	add(entry: DispatchEntry): void {
-		this.entries.set(entry.id, entry);
+		this.state.entries.set(entry.id, entry);
 		this.emitChange();
 	}
 	get(id: string): DispatchEntry | undefined {
-		return this.entries.get(id);
+		return this.state.entries.get(id);
 	}
 	all(): DispatchEntry[] {
-		return [...this.entries.values()].sort((a, b) => a.startedAt - b.startedAt);
+		return [...this.state.entries.values()].sort((a, b) => a.startedAt - b.startedAt);
 	}
 	live(): DispatchEntry[] {
 		return this.all().filter((e) => e.status === "queued" || e.status === "running" || e.status === "hung");
 	}
 	remove(id: string): void {
-		if (this.entries.delete(id)) this.emitChange();
+		if (this.state.entries.delete(id)) this.emitChange();
+	}
+	/** Drop every entry: the session runtime that owned them is being torn
+	 *  down (new/resume/fork/reload/quit). Group slots are kept on purpose —
+	 *  the torn-down runtime's dispatch closures still release into them, so
+	 *  the next session's same-group dispatch waits for the killed child to
+	 *  exit instead of oversubscribing the group. */
+	clear(): void {
+		if (this.state.entries.size === 0) return;
+		this.state.entries.clear();
+		this.emitChange();
 	}
 	/** GC finished entries older than retainSec. */
 	gc(retainSec: number): void {
 		const cutoff = Date.now() - retainSec * 1000;
 		let changed = false;
-		for (const [id, e] of this.entries) {
-			if (e.endedAt && e.endedAt < cutoff) changed = this.entries.delete(id) || changed;
+		for (const [id, e] of this.state.entries) {
+			if (e.endedAt && e.endedAt < cutoff) changed = this.state.entries.delete(id) || changed;
 		}
 		if (changed) this.emitChange();
 	}
 	/** Update an entry in place (mutable reference is shared). */
 	touch(id: string): void {
-		const e = this.entries.get(id);
+		const e = this.state.entries.get(id);
 		if (e) {
 			e.lastActivityAt = Date.now();
 			this.emitChange();
@@ -199,15 +232,25 @@ class Registry {
 	}
 }
 
-// Process-wide singleton, NOT a module-level one. Pi loads every extension
-// entry point through its own Jiti loader with `moduleCache: false`, so
-// `new Registry()` at module scope produces a *different* instance per
-// importing extension — gated-goal's reviewer would register into a registry
-// that subagent's panel / dispatch_status / watchdog / shutdown never read.
-// Symbol.for keys the instance on the shared realm instead.
-const REGISTRY_KEY = Symbol.for("pi-goal-kit.subagent.registry.v1");
+// Process-wide shared *state*, not a shared instance, and not module-scoped.
+// Pi loads every extension entry point through its own Jiti loader with
+// `moduleCache: false`, so a module-level `new Registry()` would give
+// gated-goal's reviewer a registry that subagent's panel / dispatch_status /
+// watchdog / shutdown never read. But an *instance* stored here would freeze
+// the class identity of the process's first load: `/reload` re-reads the
+// extension files, and the reloaded module would call its new methods on the
+// old prototype ("registry.clear is not a function"). So globalThis holds
+// plain data under a Symbol.for key, every module instance wraps it in its own
+// Registry, and the torn-down runtime's closures keep mutating the same state
+// through theirs.
+const REGISTRY_STATE_KEY = Symbol.for("pi-goal-kit.subagent.registry-state.v1");
 const globalStore = globalThis as Record<symbol, unknown>;
-export const registry: Registry = (globalStore[REGISTRY_KEY] ??= new Registry()) as Registry;
+const registryState = (globalStore[REGISTRY_STATE_KEY] ??= {
+	entries: new Map<string, DispatchEntry>(),
+	semaphores: new Map<string, SemaphoreState>(),
+	listeners: new Set<() => void>(),
+}) as RegistryState;
+export const registry = new Registry(registryState);
 
 export function markWaitDone(entry: DispatchEntry): boolean {
 	if (entry.waitDoneEmitted) return false;

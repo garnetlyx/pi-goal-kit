@@ -207,6 +207,89 @@ describe("subagent extension cancellation", () => {
 		expect(item.kill).toHaveBeenCalledTimes(1);
 		expect(emitted.filter((event) => event.name === "wait:done" && event.data.id === item.id)).toHaveLength(1);
 	});
+
+	it("shutdown empties the registry so the next session starts clean, keeping group slots held", async () => {
+		const { handlers, tools } = extensionHarness();
+		const cfg = {
+			defaults: { timeoutSec: 600, hungThresholdSec: 120, defaultResourceGroup: "default", retainCompletedSec: 1800, maxCapturedMessages: 1000 },
+			gatedGoal: { reviewTimeoutSec: 1800, pingTimeoutSec: 45 },
+			resourceGroups: { default: { concurrency: 4 }, "shutdown-test": { concurrency: 1 } },
+			providerGroups: {},
+			models: { suggested: [], blacklist: [] },
+			roles: {},
+		};
+		// The slot the torn-down runtime's dispatch closure still has to release.
+		const semaphore = registry.semaphoreFor(cfg, "shutdown-test");
+		await semaphore.acquire();
+		const hung = entry("hung");
+		hung.abort = vi.fn();
+		const done = entry("done");
+		done.endedAt = Date.now();
+		registry.add(hung);
+		registry.add(done);
+		try {
+			for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, {});
+
+			expect(hung.status).toBe("cancelled");
+			expect(registry.all()).toEqual([]);
+			await expect(tools.get("dispatch_status").execute("call", {})).resolves.toMatchObject({
+				content: [{ type: "text", text: "No subagents yet." }],
+			});
+			// Same slots: the next session's same-group dispatch waits for the
+			// killed child's release rather than oversubscribing the group.
+			let acquired = false;
+			const next = registry.semaphoreFor(cfg, "shutdown-test").acquire().then(() => { acquired = true; });
+			await Promise.resolve();
+			expect(acquired).toBe(false);
+			semaphore.release();
+			await next;
+			expect(acquired).toBe(true);
+		} finally {
+			registry.clear();
+		}
+	});
+
+	it("a reloaded module instance shares registry state and group slots with the previous one", async () => {
+		vi.resetModules();
+		const reloaded = await import("../extensions/subagent/scheduler.ts");
+		const cfg = {
+			defaults: { timeoutSec: 600, hungThresholdSec: 120, defaultResourceGroup: "default", retainCompletedSec: 1800, maxCapturedMessages: 1000 },
+			gatedGoal: { reviewTimeoutSec: 1800, pingTimeoutSec: 45 },
+			resourceGroups: { default: { concurrency: 4 }, "reload-test": { concurrency: 1 } },
+			providerGroups: {},
+			models: { suggested: [], blacklist: [] },
+			roles: {},
+		};
+		const item = entry("running");
+		registry.add(item);
+		const semaphore = registry.semaphoreFor(cfg, "reload-test");
+		await semaphore.acquire();
+		try {
+			// Only plain data may live on globalThis: an instance would freeze the
+			// class identity of the first load, and the reloaded module would call
+			// its methods on a prototype that lacks them.
+			const shared = (globalThis as Record<symbol, unknown>)[Symbol.for("pi-goal-kit.subagent.registry-state.v1")] as { entries: unknown; semaphores: Map<string, unknown>; listeners: unknown };
+			expect(Object.getPrototypeOf(shared)).toBe(Object.prototype);
+			expect(shared.entries).toBeInstanceOf(Map);
+			expect(shared.listeners).toBeInstanceOf(Set);
+			expect([...shared.semaphores.values()].every((slots) => Object.getPrototypeOf(slots) === Object.prototype)).toBe(true);
+
+			// Entries and slots added through this instance are visible to the reloaded one.
+			expect(reloaded.registry.all()).toContain(item);
+			let acquired = false;
+			const next = reloaded.registry.semaphoreFor(cfg, "reload-test").acquire().then(() => { acquired = true; });
+			await Promise.resolve();
+			expect(acquired).toBe(false);
+			// And mutations through the reloaded one land in the same state.
+			reloaded.registry.clear();
+			expect(registry.all()).toEqual([]);
+			reloaded.registry.semaphoreFor(cfg, "reload-test").release();
+			await next;
+			expect(acquired).toBe(true);
+		} finally {
+			vi.resetModules();
+		}
+	});
 });
 
 describe("subagent process termination", () => {
