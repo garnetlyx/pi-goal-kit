@@ -13,7 +13,7 @@ afterAll(() => {
 	if (savedChildFlag === undefined) delete process.env.PI_SUBAGENT_CHILD;
 	else process.env.PI_SUBAGENT_CHILD = savedChildFlag;
 });
-import { createProcessTerminator, runChild } from "../extensions/subagent/runner.ts";
+import { createProcessTerminator, normalizePermissions, runChild } from "../extensions/subagent/runner.ts";
 import { captureMessage, genId, getFinalOutput, markWaitDone, registry, Semaphore, type DispatchEntry } from "../extensions/subagent/scheduler.ts";
 import { blockedBy, isModelBlockedBy, normalize as normalizeConfig } from "../extensions/subagent/config.ts";
 import { sanitizeNotificationField } from "../extensions/subagent/index.ts";
@@ -421,6 +421,69 @@ describe("subagent process termination", () => {
 		vi.advanceTimersByTime(50);
 		expect(kill).toHaveBeenCalledTimes(1);
 		vi.useRealTimers();
+	});
+});
+
+describe("subagent permissions boundary", () => {
+	const sessionTools = ["read", "grep", "find", "ls", "bash", "write", "edit", "web_search", "web_fetch"];
+
+	it("unwraps a JSON-encoded whitelist and keeps presets and plain arrays", () => {
+		expect(normalizePermissions("readonly", sessionTools)).toEqual({ ok: true, permissions: "readonly" });
+		expect(normalizePermissions("bash", sessionTools)).toEqual({ ok: true, permissions: ["bash"] });
+		expect(normalizePermissions(["bash", "read"], sessionTools)).toEqual({ ok: true, permissions: ["bash", "read"] });
+		expect(normalizePermissions('["read", "bash"]', sessionTools)).toEqual({ ok: true, permissions: ["read", "bash"] });
+		expect(normalizePermissions(['["write", "read", "bash"]'], sessionTools)).toEqual({ ok: true, permissions: ["write", "read", "bash"] });
+	});
+
+	it("refuses everything that is not a tool name of the session", () => {
+		// pi-ai's coercion wraps a bare preset into ["readonly"], which is not a tool name.
+		expect(normalizePermissions(["readonly"], sessionTools)).toMatchObject({ ok: false, error: expect.stringContaining('not tool names of this session: "readonly"') });
+		expect(normalizePermissions('"readonly"', sessionTools)).toMatchObject({ ok: false });
+		expect(normalizePermissions(42, sessionTools)).toMatchObject({ ok: false, error: expect.stringContaining('"42"') });
+		expect(normalizePermissions(["bash", 7], sessionTools)).toMatchObject({ ok: false, error: expect.stringContaining('"7"') });
+		expect(normalizePermissions(["nope"], sessionTools)).toMatchObject({ ok: false, error: expect.stringContaining("read, grep, find, ls, bash, write, edit, web_search, web_fetch") });
+		expect(normalizePermissions(["[bash]"], sessionTools)).toMatchObject({ ok: false });
+	});
+
+	it("dispatch refuses unknown tool names before spawning and hands the unwrapped whitelist to the child", async () => {
+		const { tools } = extensionHarness();
+		const refused = await tools.get("dispatch").execute("call", {
+			task: "refuse me: the whitelist contains a name that is not a tool of this session",
+			timeout: 60,
+			permissions: ['["write", "read", "bash", "nope"]'],
+			model: "test/model",
+		}, undefined, undefined, executionContext());
+		expect(refused.isError).toBe(true);
+		expect(refused.content[0].text).toContain('"nope"');
+		expect(registry.live()).toEqual([]);
+
+		const item = entry("running");
+		registry.add(item);
+		const child = new EventEmitter() as any;
+		child.stdout = new PassThrough();
+		child.stderr = new PassThrough();
+		child.kill = vi.fn(() => true);
+		const spawnProcess = vi.fn((_command: string, _args: string[]) => {
+			queueMicrotask(() => child.emit("spawn"));
+			queueMicrotask(() => child.emit("close", 0, null));
+			return child;
+		});
+		const parsed = normalizePermissions('["write", "read", "bash"]', sessionTools);
+		expect(parsed).toEqual({ ok: true, permissions: ["write", "read", "bash"] });
+		if (!parsed.ok) return;
+		await runChild({
+			pi: {} as any,
+			ctx: { cwd: process.cwd() } as any,
+			entry: item,
+			modelArg: "test/model",
+			permissions: parsed.permissions,
+			timeoutSec: 60,
+			spawnProcess: spawnProcess as any,
+		});
+
+		const args: string[] = spawnProcess.mock.calls[0][1];
+		expect(args[args.indexOf("--tools") + 1]).toBe("write,read,bash");
+		expect(item.status).toBe("done");
 	});
 });
 

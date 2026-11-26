@@ -61,7 +61,7 @@ import {
 	registry,
 	splitModel,
 } from "./scheduler.ts";
-import { describePermissions, runChild } from "./runner.ts";
+import { describePermissions, normalizePermissions, runChild } from "./runner.ts";
 import { openSubagentsPanel } from "./panel.ts";
 import { registerSubagentCommand, setModelRegistry } from "./command.ts";
 import { takeModelOverride } from "./override.ts";
@@ -262,7 +262,7 @@ export default function (pi: ExtensionAPI) {
 		],
 		{
 			description:
-				"Capability gate. readonly=read/grep/find/ls/bash; junior=+write/edit; full=all tools; or an explicit tool whitelist array like [\"read\",\"grep\"]. Pick the minimum the task needs.",
+				"Capability gate. readonly=read/grep/find/ls/bash; junior=+write/edit; full=all tools; or an explicit tool whitelist array like [\"read\",\"grep\"]. Array elements must be tool names of this session — unknown names are refused with the list of valid names. Pick the minimum the task needs.",
 		},
 	);
 
@@ -394,7 +394,14 @@ export default function (pi: ExtensionAPI) {
 
 			// Explicit main-agent decisions. Role fields remain advice and prompt
 			// selection; they never silently choose model/permissions/timeout.
-			const permissions: Permissions = params.permissions;
+			// pi-ai coerces scalars into arrays for union-typed parameters, so the
+			// schema alone lets a JSON-encoded whitelist or a bare preset through
+			// as a one-element "tool name" list (see normalizePermissions).
+			const parsedPermissions = normalizePermissions(params.permissions, pi.getAllTools().map((tool) => tool.name));
+			if (!parsedPermissions.ok) {
+				return { content: [{ type: "text", text: parsedPermissions.error }], details: {}, isError: true };
+			}
+			const permissions: Permissions = parsedPermissions.permissions;
 			const modelArg = params.model;
 			const timeout = params.timeout;
 			const { provider, modelId } = splitModel(modelArg);

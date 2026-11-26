@@ -60,7 +60,10 @@ Required:
   - `"readonly"`: read/grep/find/ls/bash plus safe network tools;
   - `"junior"`: adds write/edit;
   - `"full"`: all tools, only when genuinely required;
-  - explicit array such as `["read","grep","web_search"]`.
+  - explicit array such as `["read","grep","web_search"]`. Array elements
+    must be tool names of this session (they are validated; unknown names are
+    refused with the list of valid names — a preset such as `"readonly"` goes
+    as a bare string, not inside the array).
 
   `"readonly"` withholds the write/edit tools but still includes `bash`, which
   is not sandboxed — a child that ignores instructions can still change the

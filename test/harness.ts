@@ -70,6 +70,11 @@ export function extensionHarness() {
 		},
 		registerTool(definition: any) { tools.set(definition.name, definition); },
 		registerCommand(name: string, command: any) { commands.set(name, command); },
+		/** Pi's builtin tools plus whatever the extension under test registered. */
+		getAllTools: () => [
+			...["read", "grep", "find", "ls", "bash", "write", "edit", "web_search", "web_fetch"].map((name) => ({ name })),
+			...[...tools.values()].map((tool) => ({ name: tool.name })),
+		],
 		sendUserMessage: vi.fn(),
 	} as any;
 	subagentExtension(pi);

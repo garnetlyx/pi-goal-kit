@@ -148,6 +148,16 @@ Required explicit parameters:
 - `permissions`: `readonly`, `junior`, `full`, or explicit tool names;
 - `model`: currently available `provider/modelId`.
 
+`permissions` is validated by the extension, not by the schema: pi-ai runs
+typebox `Value.Convert` over tool arguments, which turns any scalar into a
+single-element array for this union — a JSON-encoded whitelist
+(`"[\"bash\"]"`) arrives as `["[\"bash\"]"]`, a bare preset as `["readonly"]`,
+and the child's `--tools` flag would silently drop every unknown name, leaving
+the subagent without tools. `normalizePermissions` unwraps a JSON-encoded
+whitelist and refuses any name that is not a tool of the session
+(`pi.getAllTools()`), listing the valid names. The unwrapping goes away once
+pi-ai validates strictly instead of coercing.
+
 Optional `role` chooses a role description and consults user preferences. Optional
 `name` labels the dispatch. Optional `systemPrompt` overrides the role's
 default system prompt; by default the role's `systemPrompt` (if set in

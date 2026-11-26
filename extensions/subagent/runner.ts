@@ -43,6 +43,55 @@ export function describePermissions(perm: Permissions): string {
 	return perm;
 }
 
+export type PermissionsParse =
+	| { ok: true; permissions: Permissions }
+	| { ok: false; error: string };
+
+/**
+ * Validate `dispatch`'s permissions after pi's argument coercion and resolve
+ * them to a preset or a whitelist of real tool names.
+ *
+ * pi-ai runs typebox `Value.Convert` over the tool arguments
+ * (`validateToolArguments`, pi-ai `utils/validation.js`). For the
+ * `"readonly" | "junior" | "full" | string[]` union that turns *any* scalar
+ * into a single-element array, so a model that double-encodes the whitelist
+ * as a JSON string (`"[\"bash\"]"`) arrives as `["[\"bash\"]"]`, a bare `"bash"`
+ * as `["bash"]`, a number as `["42"]` — all "valid" arrays of strings. The
+ * child's `--tools` flag then drops every unknown name silently and the
+ * subagent runs with no tools at all. Hence: unwrap a JSON-encoded whitelist,
+ * and refuse anything that is not a tool of this session. Drop the unwrapping
+ * once pi-ai validates strictly instead of coercing scalars into arrays.
+ */
+export function normalizePermissions(value: unknown, toolNames: readonly string[]): PermissionsParse {
+	if (value === "readonly" || value === "junior" || value === "full") return { ok: true, permissions: value };
+	const elements: unknown[] = Array.isArray(value) ? value : [value];
+	const names: unknown[] = [];
+	for (const element of elements) {
+		if (typeof element === "string" && /^\s*\[/.test(element)) {
+			try {
+				const parsed: unknown = JSON.parse(element);
+				if (Array.isArray(parsed)) {
+					names.push(...parsed);
+					continue;
+				}
+			} catch {
+				/* not JSON: reported as an unknown name below */
+			}
+		}
+		names.push(element);
+	}
+	const unknown = names.filter((name) => typeof name !== "string" || !toolNames.includes(name));
+	if (unknown.length === 0) return { ok: true, permissions: names as string[] };
+	const shown = toolNames.slice(0, 40).join(", ") + (toolNames.length > 40 ? ` … (${toolNames.length - 40} more)` : "");
+	return {
+		ok: false,
+		error:
+			`permissions: not tool names of this session: ${unknown.map((name) => `"${String(name)}"`).join(", ")}. ` +
+			`Pass one preset ("readonly", "junior", "full") as a bare string, or an array of tool names. ` +
+			`Available tools: ${shown || "(none)"}.`,
+	};
+}
+
 export function createProcessTerminator(
 	proc: Pick<import("node:child_process").ChildProcess, "kill">,
 	forceAfterMs = 5000,
