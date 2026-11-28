@@ -13,8 +13,10 @@
  *                   dispatches it.
  *
  * Non-blocking: dispatch returns an id immediately. When the child finishes,
- * the resume text is injected into the current session via
- * pi.sendUserMessage(..., { deliverAs: "followUp" }) plus a system notification.
+ * the resume text is injected into the current session as a follow-up plus a
+ * system notification. Delivery goes through the compaction-safe sink in
+ * ./follow-up.ts: a completion that lands while the user is mid-/compact is
+ * held until compaction ends instead of being rejected.
  *
  * Roles: user suggestions in subagent.json are advisory; the role's
  * models.suggested list is binding - the main agent picks from it when the
@@ -65,37 +67,8 @@ import { describePermissions, normalizePermissions, runChild } from "./runner.ts
 import { openSubagentsPanel } from "./panel.ts";
 import { registerSubagentCommand, setModelRegistry } from "./command.ts";
 import { takeModelOverride } from "./override.ts";
+import { createFollowUpSink } from "./follow-up.ts";
 
-/**
- * pi >= 1.5 throws "Cannot submit a prompt while compaction is in progress"
- * for prompts arriving during a manual /compact instead of queuing them. This
- * call site fires from an async completion callback that cannot know whether
- * the user is mid-compaction, so retry until the window passes (15 x 20s =
- * 5min coverage; compaction runs tens of seconds).
- *
- * Duplicated in reminder-hook/index.ts on purpose: extensions install flat
- * (state/agent/extensions/<name>/) and cannot import across dirs.
- * Remove once upstream queues extension follow-ups during compaction instead
- * of throwing.
- */
-export const COMPACTION_BUSY_SNIPPET = "Cannot submit a prompt while compaction is in progress";
-const SEND_RETRY_DELAY_MS = 20_000;
-export const SEND_RETRY_MAX_ATTEMPTS = 15;
-
-export async function sendFollowUpWithCompactionRetry(pi: ExtensionAPI, text: string): Promise<void> {
-	for (let attempt = 1; ; attempt++) {
-		try {
-			await pi.sendUserMessage(text, { deliverAs: "followUp" });
-			return;
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			if (attempt >= SEND_RETRY_MAX_ATTEMPTS || !message.includes(COMPACTION_BUSY_SNIPPET)) {
-				throw error;
-			}
-			await new Promise((resolve) => setTimeout(resolve, SEND_RETRY_DELAY_MS));
-		}
-	}
-}
 import {
 	availableModelRecords,
 	dispatchableModelRecords,
@@ -169,6 +142,9 @@ export default function (pi: ExtensionAPI) {
 	if (process.env.PI_SUBAGENT_CHILD === "1") return;
 
 	const baseDir = dirname(fileURLToPath(import.meta.url));
+	// Completions land from the child's exit callback, which cannot know whether
+	// the user is mid-/compact; the sink holds what pi would reject until it ends.
+	const followUp = createFollowUpSink(pi);
 
 	// Contribute this extension's bundled SKILL.md so the main agent sees the
 	// subagent skill without a separate entry under skills/. Keeps the skill
@@ -226,10 +202,7 @@ export default function (pi: ExtensionAPI) {
 			try { notifySystem(`↩️ Pi subagent ${finalStatus}`, `${entry.name}: ${entry.task.slice(0, 80)}`); } catch { /* best-effort */ }
 			try { ctx.ui.notify(`subagent "${entry.name}" ${finalStatus}`, finalStatus === "done" ? "info" : "warning"); } catch { /* best-effort */ }
 		}
-		void sendFollowUpWithCompactionRetry(pi, resume).catch((error) => {
-			const message = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(`subagent "${entry.name}" delivery failed: ${message}`, "warning");
-		});
+		followUp.say(resume);
 		entry.completionDelivered = true;
 	};
 

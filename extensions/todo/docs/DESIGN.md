@@ -75,6 +75,21 @@ need the list to *be* that plan. Instructing the model to "now add these todos"
 instead appends them to whatever it wrote down earlier, producing duplicate
 work and misleading progress.
 
+## Re-arming the nudge (`todo:nudge-reset`)
+
+```
+pi.events.emit("todo:nudge-reset", { source })
+```
+
+Clears the nudge de-duplication signature (see Completion nudge) without touching
+the list. It is for a workflow extension that hands the agent new work while the
+list stays as it is — gated-goal relaying reviewer feedback — so that the next
+stop with an incomplete list is nudged once again instead of going straight to
+the workflow's completion path. Without it the list was mentioned exactly once
+per gate: the first nudge, then `review` forever, because nothing ever changed
+the incomplete-id set. The same de-duplication bounds it: one nudge per
+emission, never a loop.
+
 ## Widget
 
 `ctx.ui.setWidget("todo", lines, { placement: "belowEditor" })` whenever the
@@ -119,7 +134,8 @@ Delivered as `followUp` + a `warning` notify.
 incomplete set each time it fires. If `agent_settled` fires again with the
 same incomplete signature, the nudge is suppressed — the agent already saw it
 and chose to stop, do not spam. Any mutation through the `todo` tool resets
-the signature so the next stop nudges freshly.
+the signature so the next stop nudges freshly, and so does a
+`todo:nudge-reset` event (below).
 
 After deciding, todo emits the shared `todo:settled` event exported by
 `snapshot.ts`:

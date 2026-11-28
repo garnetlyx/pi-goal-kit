@@ -12,7 +12,14 @@ export type Ctx = any;
 export type Handler = (e: unknown, ctx: Ctx) => Promise<void> | void;
 
 export function makeHarness(ctx: Ctx) {
+	// The real bus delivers to every listener: todo and gated-goal both
+	// subscribe to `agent_settled` and gated-goal listens to `todo:settled`.
+	// `eventHandlers.get(name)` stays a callable that dispatches to all of them.
+	const listeners = new Map<string, ((data: unknown) => void)[]>();
 	const eventHandlers = new Map<string, (data: unknown) => void>();
+	const emit = (name: string, data: unknown) => {
+		for (const h of listeners.get(name) ?? []) h(data);
+	};
 	const hooks = new Map<string, Handler[]>();
 	const commands = new Map<string, { handler: (args: string, ctx: Ctx) => Promise<unknown> }>();
 	const tools = new Map<string, { execute: (id: string, params: any, signal: unknown, onUpdate: unknown, ctx: Ctx) => Promise<any> }>();
@@ -23,8 +30,13 @@ export function makeHarness(ctx: Ctx) {
 			hooks.get(name)!.push(h);
 		},
 		events: {
-			on: (name: string, h: (d: unknown) => void) => eventHandlers.set(name, h),
-			emit: (name: string, data: unknown) => eventHandlers.get(name)?.(data),
+			on: (name: string, h: (d: unknown) => void) => {
+				const list = listeners.get(name) ?? [];
+				list.push(h);
+				listeners.set(name, list);
+				eventHandlers.set(name, (d: unknown) => emit(name, d));
+			},
+			emit,
 		},
 		registerCommand: (name: string, cmd: { handler: (args: string, ctx: Ctx) => Promise<unknown> }) => commands.set(name, cmd),
 		registerTool: (t: { name: string; execute: any }) => tools.set(t.name, t),

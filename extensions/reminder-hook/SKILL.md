@@ -15,6 +15,8 @@ This never blocks the user conversation:
 - When the condition is met, your resume `message` is queued with
   `deliverAs: "followUp"` — it triggers a new turn only when the agent is idle.
   If the user is mid-conversation, the reminder waits; it never interrupts.
+- If a `/compact` is running when the reminder fires, the resume message is
+  held until compaction finishes and delivered then.
 
 ## The one tool: `set_reminder`
 

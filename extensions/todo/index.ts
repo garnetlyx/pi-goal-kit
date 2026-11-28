@@ -17,14 +17,19 @@
  * done.
  *
  * Cross-extension coordination uses the pi.events bus:
- *   wait:active  { source, id }  — something is being waited on
- *   wait:done    { source, id }  — the wait ended
- *   todo:replace { source, items, ctx } — replace the whole list atomically
+ *   wait:active      { source, id }  — something is being waited on
+ *   wait:done        { source, id }  — the wait ended
+ *   todo:replace     { source, items, ctx } — replace the whole list atomically
+ *   todo:nudge-reset { source } — re-arm the nudge: a new work iteration began
  * Any extension that represents a wait should emit the first two so the todo
  * nudge stays silent while the agent is legitimately blocked (sources seen so
- * far: "reminder-hook", "subagent"). The third is for an extension that owns a
- * plan and needs the list to match it exactly instead of asking the model to
- * re-type it; see snapshot.ts for the read model both sides share.
+ * far: "reminder-hook", "subagent"). The third is for an extension that owns
+ * a plan and needs the list to match it exactly instead of asking the model to
+ * re-type it. The fourth is for a workflow extension that hands the agent new
+ * work without touching the list (gated-goal relaying reviewer feedback): the
+ * incomplete set is unchanged, so the de-duplication would swallow the nudge
+ * forever. See snapshot.ts for the read model and event contracts both sides
+ * share.
  */
 
 import { dirname, join } from "node:path";
@@ -42,6 +47,7 @@ import {
 	TODO_REPLACE_EVENT,
 	TODO_SETTLED_EVENT,
 	TODO_STATE_ENTRY,
+	TODO_NUDGE_RESET_EVENT,
 } from "./snapshot.ts";
 import { openTodosPanel } from "./panel.ts";
 
@@ -199,6 +205,11 @@ export default function (pi: ExtensionAPI) {
 		resetNudgeSig();
 		renderWidget(ctx);
 	});
+
+	// A workflow extension starting a new work iteration re-arms the nudge. The
+	// agent has fresh reasons to look at the list even though the incomplete
+	// set did not change, which is exactly what the de-duplication keys on.
+	pi.events.on(TODO_NUDGE_RESET_EVENT, () => resetNudgeSig());
 
 	// The nudge: if the agent settles with incomplete todos and nothing is being
 	// waited on, push it to verify/continue.

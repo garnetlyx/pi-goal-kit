@@ -17,7 +17,7 @@ extension arms a setInterval (polled every poll_seconds)
         │
         │  bash -c "$condition" exits 0   (powershell -NoProfile -Command on Windows without bash)
         ▼
-pi.sendUserMessage(message, { deliverAs: "followUp" })
+follow-up sink → pi.sendUserMessage(message, { deliverAs: "followUp" })
   + ctx.ui.notify + system notification (osascript / OSC777 / notify-send)
   + remove from reminders.json
 ```
@@ -26,11 +26,17 @@ The `followUp` delivery mode is what guarantees non-blocking behavior: if the
 user is mid-conversation when the reminder fires, the resume message queues
 and triggers a new turn only when the agent is idle. It never interrupts.
 
+Delivery goes through the shared sink in `extensions/subagent/follow-up.ts`:
+a wake-up that fires while the user is mid-`/compact` is held until compaction
+ends. Pi rejects a prompt submitted during a manual compaction and does not
+report it to the caller, so without the sink the wake-up was simply lost.
+
 ## Files
 
 | Path | Purpose |
 |------|---------|
 | `extensions/reminder-hook/index.ts` | extension source: tools, commands, poller, persistence |
+| `extensions/subagent/follow-up.ts` | shared follow-up sink: holds the resume message through a manual compaction |
 | `<agent dir>/reminder-hook/sessions/<sessionId>/reminders.json` | session-scoped persisted reminders (survive `/reload` and restart) |
 | `extensions/reminder-hook/SKILL.md` | agent-facing instructions (when/how to use the tools) |
 

@@ -5,8 +5,10 @@
  * completion condition as a shell command (exit 0 = done), optionally gated
  * by an absolute time or a countdown, and leaves a resume prompt for itself.
  * When the condition is met, the extension sends that prompt back to the
- * agent via `pi.sendUserMessage(..., { deliverAs: "followUp" })`, so the
- * agent wakes up and continues without anyone busy-polling by hand.
+ * agent as a follow-up, so the agent wakes up and continues without anyone
+ * busy-polling by hand. Delivery goes through the compaction-safe sink in
+ * ../subagent/follow-up.ts: a wake-up that fires while the user is
+ * mid-/compact is held until compaction ends instead of being rejected.
  *
  * Why one generic tool instead of many:
  *   Every "wait for X" reduces to a predicate. Time, PIDs, files, URLs, logs,
@@ -36,38 +38,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { Type } from "typebox";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadReminderConfig } from "./config.ts";
+import { createFollowUpSink } from "../subagent/follow-up.ts";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-
-/**
- * pi >= 1.5 throws "Cannot submit a prompt while compaction is in progress"
- * for prompts arriving during a manual /compact instead of queuing them. This
- * call site fires from wall-clock callbacks (timer/condition completions) that
- * cannot know whether the user is mid-compaction, so retry until the window
- * passes (15 x 20s = 5min coverage; compaction runs tens of seconds).
- *
- * Duplicated in subagent/index.ts on purpose: extensions install flat
- * (state/agent/extensions/<name>/) and cannot import across dirs.
- * Remove once upstream queues extension follow-ups during compaction instead
- * of throwing.
- */
-export const COMPACTION_BUSY_SNIPPET = "Cannot submit a prompt while compaction is in progress";
-const SEND_RETRY_DELAY_MS = 20_000;
-export const SEND_RETRY_MAX_ATTEMPTS = 15;
-
-export async function sendFollowUpWithCompactionRetry(pi: ExtensionAPI, text: string): Promise<void> {
-	for (let attempt = 1; ; attempt++) {
-		try {
-			await pi.sendUserMessage(text, { deliverAs: "followUp" });
-			return;
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			if (attempt >= SEND_RETRY_MAX_ATTEMPTS || !message.includes(COMPACTION_BUSY_SNIPPET)) {
-				throw error;
-			}
-			await new Promise((resolve) => setTimeout(resolve, SEND_RETRY_DELAY_MS));
-		}
-	}
-}
 
 interface Reminder {
 	id: string;
@@ -180,6 +152,9 @@ function parseTime(input: string): number {
 
 export default function (pi: ExtensionAPI) {
 	const baseDir = path.dirname(fileURLToPath(import.meta.url));
+	// Wake-ups fire from wall-clock callbacks that cannot know whether the user
+	// is mid-/compact; the sink holds what pi would reject until it ends.
+	const followUp = createFollowUpSink(pi);
 
 	// Co-locate this extension's skill with its code; register it so pi loads
 	// the SKILL.md without a separate skills/ entry.
@@ -214,10 +189,7 @@ export default function (pi: ExtensionAPI) {
 		const prefix = opts.timeout
 			? `⏰ Reminder "${label}" TIMED OUT after waiting. Give up, change approach, or re-arm.\n\n`
 			: `⏰ Reminder "${label}" fired.\n\n`;
-		void sendFollowUpWithCompactionRetry(pi, prefix + r.message).catch((error) => {
-			const message = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(`reminder "${label}" delivery failed: ${message}`, "warning");
-		});
+		followUp.say(prefix + r.message);
 	}
 
 	// The condition executor. Windows has no `bash` by default, so we prefer

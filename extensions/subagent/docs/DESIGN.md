@@ -72,11 +72,14 @@ extension acquires semaphore and spawns:
         | registry mutations push renders to /subagents
         | watchdog flags inactivity; hard timeout kills child
         v
-pi.sendUserMessage(result, { deliverAs: "followUp" })
+follow-up sink → pi.sendUserMessage(result, { deliverAs: "followUp" })
 ```
 
-Completion uses Pi's session-level follow-up queue. During compaction, the
-host must queue explicit extension follow-ups and resume them afterward.
+Completion uses Pi's session-level follow-up queue, through the shared sink in
+`follow-up.ts`: pi rejects a prompt submitted during a manual `/compact` without
+telling the caller, so the sink holds the completion from `session_before_compact`
+until the compaction's end event and delivers it then. `gated-goal` and
+`reminder-hook` send their follow-ups through the same sink.
 
 `PI_SUBAGENT_CHILD=1` makes the extension a no-op in children, preventing
 nested dispatch.
@@ -118,6 +121,7 @@ killed child to exit instead of oversubscribing the group.
 | `extensions/subagent/override.ts` | one-time blacklist override for a human-picked model |
 | `extensions/subagent/scheduler.ts` | live registry, subscriptions, semaphores |
 | `extensions/subagent/runner.ts` | child spawn, JSON capture, timeout, tool gate, context-file gate |
+| `extensions/subagent/follow-up.ts` | shared follow-up sink: holds messages through a manual compaction, drops them on session shutdown |
 | `extensions/subagent/panel.ts` | bordered `/subagents` overlay |
 | `extensions/subagent/config.ts` | `subagent.json` loader/seeder |
 | `subagent.json` | single user-owned subagent configuration (roles + optional prompts) |

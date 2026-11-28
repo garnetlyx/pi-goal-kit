@@ -37,6 +37,8 @@ export const TODO_STATE_ENTRY = "todo-state";
 export const TODO_REPLACE_EVENT = "todo:replace";
 /** Event emitted after todo owns the settle decision for the current turn. */
 export const TODO_SETTLED_EVENT = "todo:settled";
+/** Event that re-arms the completion nudge. Payload: TodoNudgeResetEvent. */
+export const TODO_NUDGE_RESET_EVENT = "todo:nudge-reset";
 
 export type TodoSettleDisposition = "continue" | "wait" | "review";
 
@@ -52,6 +54,11 @@ export interface TodoReplaceEvent {
 	items: { text: string; status?: TodoStatus }[];
 	/** Live context of the caller — used to render the widget and persist. */
 	ctx: ExtensionContext;
+}
+
+export interface TodoNudgeResetEvent {
+	/** Who re-armed the nudge (for logging/debugging). */
+	source: string;
 }
 
 function coerce(raw: unknown): TodoSnapshot | undefined {

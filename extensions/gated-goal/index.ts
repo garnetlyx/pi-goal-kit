@@ -25,6 +25,12 @@
  *             always gets its verify pass, even on the last iteration)
  *     edits → feed feedback to main agent, → P3. If reviewsCompleted reaches
  *             maxIteration before a done → exit (reason: max iteration reached).
+ * Every return to P3 — reviewer feedback, a rejected approval, a lost verdict,
+ * restart recovery — re-arms todo's completion nudge (todo:nudge-reset) and the
+ * feedback asks the agent to reconcile the list. A new iteration is a new nudge
+ * boundary: the incomplete set does not change by itself, so without the
+ * re-arm the list would never be looked at again after its first nudge.
+ *
  * P5 verify          — main agent re-runs the frozen verification itself and
  *   judges the output, because a reviewer can rubber-stamp:
  *     confirm_done → exit (reason: done)
@@ -38,6 +44,12 @@
  * time; on mismatch the copy archived in the session at freeze time is reviewed
  * instead and the agent is told — never exit (a mismatch must not become an
  * escape hatch out of the gate).
+ *
+ * Delivery: every follow-up goes through the compaction-safe sink
+ * (../subagent/follow-up.ts). A verdict that lands while the user runs /compact
+ * is held until compaction ends instead of being rejected and lost — state is
+ * written before the message, so a lost message used to mean a charged
+ * iteration whose feedback the agent never saw.
  */
 
 import { dirname, join } from "node:path";
@@ -58,9 +70,12 @@ import { pingReviewer, runReview, cancelActiveReviewer } from "./reviewer.ts";
 import { freezeStatusHint, recoverInterruptedFreeze, registerFreezePlanTool, type FreezeGate, type TodoItem } from "./plan-review.ts";
 import { availableModels } from "../subagent/models.ts";
 import { pickModel } from "../subagent/model-picker.ts";
+import { createFollowUpSink } from "../subagent/follow-up.ts";
 import {
+	TODO_NUDGE_RESET_EVENT,
 	TODO_REPLACE_EVENT,
 	TODO_SETTLED_EVENT,
+	type TodoNudgeResetEvent,
 	type TodoReplaceEvent,
 	type TodoSettledEvent,
 } from "../todo/snapshot.ts";
@@ -100,6 +115,11 @@ export default function (pi: ExtensionAPI) {
 	// In-memory mirror of persisted state; reloaded on session_start.
 	let state: GatedGoalState = { phase: "idle", maxIteration: DEFAULT_MAX_ITERATION, reviewsCompleted: 0, freezeRejections: 0, reviewerModel: "", reviewerPermissions: REVIEWER_PERMISSIONS, frozenPrompt: "", frozenHash: "", startedAt: 0, originalCwd: "" };
 	let ready = false;
+
+	// Every follow-up the gate sends (phase messages, verdicts, feedback, exit)
+	// goes through this sink: a verdict lands from an async continuation and
+	// cannot know whether the user is mid-/compact, which would reject it.
+	const followUp = createFollowUpSink(pi);
 
 	// Epoch latch for async continuations. Every authoritative transition (exit,
 	// new gate, session switch) bumps it; a review cycle captures the value at
@@ -157,12 +177,9 @@ export default function (pi: ExtensionAPI) {
 	// completion.
 	pi.on("session_start", async (_e, ctx) => {
 		if (state.phase === "review") {
-			state.phase = "act";
-			save(ctx, state);
-			setStatus(ctx, "recovering");
-			pi.sendUserMessage(
+			enterAct(ctx, "recovering");
+			followUp.say(
 				`⚠️ Review ${state.reviewsCompleted + 1}/${state.maxIteration} was interrupted by a restart before it returned a verdict — its feedback is lost and no iteration was charged. Back in ACT. If all work is complete, present your completion summary and stop — a fresh review will run automatically.`,
-				{ deliverAs: "followUp" },
 			);
 		} else {
 			// P2.5 owns its own recovery (transcript cleanup included).
@@ -178,6 +195,19 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setStatus?.("gated-goal", (phase + " " + (extra ?? freezeStatusHint(state))).trim());
 	}
 
+	/** Back to ACT on the gate's own instruction (feedback, a rejected approval,
+	 *  a lost verdict, restart recovery). The iteration that starts here is also
+	 *  a new nudge boundary: todo de-duplicates its completion nudge by the
+	 *  incomplete-id set, which none of these events change, so without the
+	 *  re-arm the agent would be asked to reconcile the list exactly once per
+	 *  gate — at the first stop — and never again. */
+	function enterAct(ctx: ExtensionContext, extra?: string): void {
+		state.phase = "act";
+		save(ctx, state);
+		setStatus(ctx, extra);
+		pi.events.emit(TODO_NUDGE_RESET_EVENT, { source: "gated-goal" } satisfies TodoNudgeResetEvent);
+	}
+
 	// What plan-review.ts may do to the gate. P2.5's tool, budget, recovery and
 	// footer hints live there; this is the whole of its access to the gate.
 	const freezeGate: FreezeGate = {
@@ -185,7 +215,7 @@ export default function (pi: ExtensionAPI) {
 		epoch: () => gateEpoch,
 		save,
 		setStatus,
-		say: (ctx, text) => pi.sendUserMessage(text, { deliverAs: "followUp" }),
+		say: (_ctx, text) => followUp.say(text),
 		enterAct: (ctx, todos, frozenPrompt) => freeze(ctx, todos, frozenPrompt),
 	};
 
@@ -210,10 +240,9 @@ export default function (pi: ExtensionAPI) {
 		// confirm_done passes "done — <note>", so match the prefix, not equality.
 		const succeeded = reason === "done" || reason.startsWith("done —");
 		ctx.ui.notify(`gated-goal exited: ${reason}`, succeeded ? "info" : "warning");
-		pi.sendUserMessage(
+		followUp.say(
 			`🚪 Gated-goal exited — reason: ${reason}.` +
 			(succeeded ? " Reviewer approved and you confirmed it." : ""),
-			{ deliverAs: "followUp" },
 		);
 	}
 
@@ -238,9 +267,7 @@ export default function (pi: ExtensionAPI) {
 				// this continuation no longer owns the state. Discard silently.
 				if (gateEpoch !== myEpoch) return;
 				ctx.ui.notify(`reviewer crashed: ${err?.message ?? err}`, "error");
-				state.phase = "act";
-				save(ctx, state);
-				setStatus(ctx);
+				enterAct(ctx);
 				return;
 			}
 
@@ -268,14 +295,14 @@ export default function (pi: ExtensionAPI) {
 				setStatus(ctx, "verifying");
 				const verificationSection = extractSection(state.frozenPrompt, "Verification");
 				const tamperNote = integrityNote(result);
-				pi.sendUserMessage(
+				followUp.say(
 					`✅ Reviewer (iteration ${reviewNumber}) returned <promise>DONE</promise>${tamperNote}. ` +
 					`Before accepting, INDEPENDENTLY verify — reviewers can rubber-stamp. ` +
 					`Run the frozen verification yourself and judge the real output subjectively:\n\n` +
 					`--- Verification (from frozen plan) ---\n${verificationSection}\n--- end ---\n\n` +
 					`If it genuinely holds: call confirm_done (exits gated-goal, reason: done). ` +
 					`If the reviewer approved wrongly: call reject_done with what failed (goes back to ACT for fixes; this counts as a used iteration).`,
-					{ deliverAs: "followUp" },
+					{ isStale: () => gateEpoch !== myEpoch },
 				);
 				return;
 			}
@@ -284,14 +311,12 @@ export default function (pi: ExtensionAPI) {
 			// was cancelled. Truncated output is never a review conclusion, so
 			// charge nothing and go back to ACT (see Iteration accounting).
 			if (result.status !== "done") {
-				state.phase = "act";
-				save(ctx, state);
-				setStatus(ctx);
+				enterAct(ctx);
 				const detail = result.output && result.output !== "(no output)" ? ` Detail: ${result.output.slice(0, 300).trim()}` : "";
-				pi.sendUserMessage(
+				followUp.say(
 					`⏱ Reviewer ${result.status === "timeout" ? "hit the review window" : `crashed (${result.status})`} — not a verdict, no iteration charged.${detail} ` +
 					`Back to ACT. If this keeps happening, raise \`gatedGoal.reviewTimeoutSec\` in subagent.json.`,
-					{ deliverAs: "followUp" },
+					{ isStale: () => gateEpoch !== myEpoch },
 				);
 				return;
 			}
@@ -305,13 +330,13 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// Feedback → back to act. Hand control to main agent.
-			state.phase = "act";
-			save(ctx, state);
-			setStatus(ctx, `iteration ${state.reviewsCompleted}`);
+			enterAct(ctx, `iteration ${state.reviewsCompleted}`);
 			const tamperNote = integrityNote(result);
-			pi.sendUserMessage(
-				`🔁 Reviewer (iteration ${state.reviewsCompleted}/${state.maxIteration}) was NOT satisfied${tamperNote}. Required changes:\n\n${result.output}\n\nApply these changes, then stop when done. The reviewer will run again automatically.`,
-				{ deliverAs: "followUp" },
+			followUp.say(
+				`🔁 Reviewer (iteration ${state.reviewsCompleted}/${state.maxIteration}) was NOT satisfied${tamperNote}. Required changes:\n\n${result.output}\n\n` +
+					`First reconcile your todo list with this feedback — mark what is already finished, add each required change that is not on it, drop what is obsolete — ` +
+					`then apply the changes, marking items done as you go, and stop when done. The reviewer will run again automatically.`,
+				{ isStale: () => gateEpoch !== myEpoch },
 			);
 		})();
 	}
@@ -334,9 +359,8 @@ export default function (pi: ExtensionAPI) {
 			// Anti-stall: the agent finished a turn in VERIFY without calling
 			// confirm_done / reject_done (those tools flip phase away from verify).
 			// Nudge it to pick one explicitly.
-			pi.sendUserMessage(
+			followUp.say(
 				`You are still in VERIFY phase. You must decide: call confirm_done (if your independent verification passed) or reject_done (with what failed). Do not stop without one of them.`,
-				{ deliverAs: "followUp" },
 			);
 		}
 	});
@@ -419,10 +443,9 @@ export default function (pi: ExtensionAPI) {
 			save(ctx, state);
 			setStatus(ctx, "planning");
 			ctx.ui.notify(`Gated-goal ON — reviewer: ${reviewerModel}, max ${maxIteration} iterations. Discuss the goal, then call freeze_plan.`, "info");
-			pi.sendUserMessage(
+			followUp.say(
 				`🎯 Gated-goal started (reviewer=${reviewerModel}, maxIterations=${maxIteration}). ` +
 				`We are now in PLAN phase. Discuss with the user to align on the goal. When the user confirms, call freeze_plan with: outcome, verification (commands/tools), constraints (what not to do), quality (e.g. tests must pass), and todos (the work items). Only call freeze_plan after explicit user confirmation.`,
-				{ deliverAs: "followUp" },
 			);
 		},
 	});
@@ -463,9 +486,8 @@ export default function (pi: ExtensionAPI) {
 		const todoLines = todos
 			.map((t, i) => `  ${i + 1}. ${t.text}`)
 			.join("\n");
-		pi.sendUserMessage(
+		followUp.say(
 			`📋 Plan frozen (sha256 ${state.frozenHash.slice(0, 12)}…). Your todo list has been replaced with the frozen one (${todos.length} item(s)) — do NOT add them again:\n${todoLines}\n\nStart ACTING. Mark items done as you finish them. When work is complete, stop with an all-done or cleared list; todo will nudge once for fresh incomplete work, and review starts when no continuation is scheduled.`,
-			{ deliverAs: "followUp" },
 		);
 	};
 	registerFreezePlanTool(pi, freezeGate);
@@ -520,12 +542,10 @@ export default function (pi: ExtensionAPI) {
 				exitGate(ctx, "max iteration reached");
 				return { content: [{ type: "text", text: `Rejected — no iterations left (${state.reviewsCompleted}/${state.maxIteration}). Gated-goal exited.` }], details: {} };
 			}
-			state.phase = "act";
-			save(ctx, state);
-			setStatus(ctx, `iteration ${state.reviewsCompleted}`);
-			pi.sendUserMessage(
-				`🔁 You rejected the reviewer's <promise>DONE</promise> as a rubber-stamp (iteration ${state.reviewsCompleted}/${state.maxIteration}). Reason: ${params.reason}\n\nApply the fix, then stop. The reviewer will run again automatically.`,
-				{ deliverAs: "followUp" },
+			enterAct(ctx, `iteration ${state.reviewsCompleted}`);
+			followUp.say(
+				`🔁 You rejected the reviewer's <promise>DONE</promise> as a rubber-stamp (iteration ${state.reviewsCompleted}/${state.maxIteration}). Reason: ${params.reason}\n\n` +
+				`First reconcile your todo list with this reason — mark what is already finished, add the fix if it is not on the list — then apply it, marking items done as you go, and stop. The reviewer will run again automatically.`,
 			);
 			return { content: [{ type: "text", text: `Rejected — back to ACT. iteration ${state.reviewsCompleted}/${state.maxIteration}.` }], details: {} };
 		},

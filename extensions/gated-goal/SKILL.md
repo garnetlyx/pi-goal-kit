@@ -73,6 +73,11 @@ todo extension alone decides what follows:
 So: mark items done as you finish. You may clear the list when the work is
 complete; reviewer feedback can create fresh todos for the next ACT round.
 
+Each time the gate sends you back to ACT (reviewer feedback, a rejected
+approval), the completion nudge is re-armed and the message asks you to
+reconcile the list with the feedback. Do that first: mark what is finished, add
+the required changes, drop what is obsolete — then work the list.
+
 ### P4 — review
 The reviewer subagent re-checks the work against the **frozen** plan and runs
 the verification commands. The iteration counter ticks on either outcome — a

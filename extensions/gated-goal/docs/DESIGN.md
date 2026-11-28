@@ -483,6 +483,17 @@ and calls `runReviewCycle(ctx)` only for `review` while `phase === "act"` and a
 frozen hash exists. This keeps the settle decision in one module and avoids
 handler-order races between independent `agent_settled` subscribers.
 
+Every return to ACT on the gate's own instruction — reviewer feedback,
+`reject_done`, a lost verdict (timeout, crash, cancellation), restart recovery
+— goes through `enterAct`, which also emits `todo:nudge-reset`: a new iteration
+is a new nudge boundary. The incomplete set is unchanged, so without the
+re-arm todo's de-duplication reads the next stop as "already nudged" and
+reports `review` at once; the list would be looked at exactly once per gate.
+The feedback messages name the list for the same reason ("reconcile your todo
+list with this feedback"). One re-arm buys one nudge; the stop after that is
+`review` again, so an agent that keeps ignoring the list still reaches the
+reviewer — and the iteration budget — instead of looping.
+
 ## Iteration accounting
 
 `reviewsCompleted` is charged in exactly one place: when a review finishes
@@ -520,12 +531,42 @@ Gated-goal composes the three earlier extensions:
 
 - **todo** — owns the todo list plus all `agent_settled`, nudge de-duplication,
   and active-wait decisions. Gated-goal consumes todo's exported
-  `todo:settled` disposition and never duplicates those rules. The reviewer's
-  `wait:active` keeps todo in `wait` while P4 is running.
+  `todo:settled` disposition and never duplicates those rules; its only write
+  into todo is the `todo:nudge-reset` event at every return to ACT (see
+  Transition rule). The reviewer's `wait:active` keeps todo in `wait` while P4
+  is running.
 - **subagent** — reviewer is a subagent. Reuses `genId`, `registry`, `splitModel`,
-  and `runChild`. Shows in `/subagents`.
+  `runChild`, and the follow-up sink (`follow-up.ts`, below). Shows in
+  `/subagents`.
 - **reminder-hook** — not used directly, but the `wait:active/wait:done` protocol
   it established is what makes the todo nudge stay quiet during reviews.
+
+## Follow-up delivery across compaction
+
+Every message the gate sends — phase announcements, verdicts, feedback, the
+exit line — goes through `createFollowUpSink`
+(`extensions/subagent/follow-up.ts`). A verdict lands from an async continuation
+that cannot know whether the user is mid-`/compact`; pi rejects a prompt
+submitted during a manual compaction ("Cannot submit a prompt while compaction
+is in progress") and, since `pi.sendUserMessage` returns `void` and core
+reports the rejection itself, the extension never learned of it. The message
+was lost after the state write: a charged iteration (`reviewsCompleted`,
+`phase: act`) whose feedback the agent never received, or a gate parked in
+VERIFY with nothing to say.
+
+The sink holds such messages from `session_before_compact` until the
+compaction's end event — flushed one macrotask later, because pi emits
+`session_compact` before clearing its prompt guard (earendil-works/pi#9647) —
+and drops everything on `session_shutdown`. The three verdict continuations
+pass `isStale: () => gateEpoch !== myEpoch`, so a verdict held through a
+compaction during which the gate exited is discarded instead of resurrecting
+it: the epoch latch's rule, applied at delivery time and not only before the
+send. The reminder-hook and subagent extensions deliver their wake-ups and
+completions through the same sink for the same reason.
+
+Removal condition: pi queues extension follow-ups during compaction instead of
+rejecting them (upstream #9647). The sink then collapses to a plain
+`pi.sendUserMessage(text, { deliverAs: "followUp" })`.
 
 ## Footer status
 

@@ -40,9 +40,13 @@ Pi auto-discovers `extensions/*/index.ts` and enables them by default after
 install. Use `pi config` to disable any you don't want.
 
 > [!IMPORTANT]
-> Reliable reminder, subagent, and todo continuation through manual compaction
-> requires a Pi host that queues explicit extension follow-ups during
-> compaction. Otherwise, do not run `/compact` while waits are active.
+> Reminder wake-ups, subagent completions, and reviewer verdicts survive a manual
+> `/compact`: the shared follow-up sink (`extensions/subagent/follow-up.ts`) holds
+> them from `session_before_compact` until compaction ends. Pi itself rejects a
+> prompt submitted during compaction and does not report it to the caller
+> ([earendil-works/pi#9647](https://github.com/earendil-works/pi/issues/9647));
+> without the sink the message was lost — for gated-goal, a charged iteration
+> whose feedback the agent never saw.
 
 ## The extensions (simple → complex)
 
@@ -189,11 +193,15 @@ instruction is a strong default, not an enforced boundary.
 wait:active  { source: string, id: string }   — something is being waited on
 wait:done    { source: string, id: string }   — wait resolved
 todo:settled { disposition, ctx }             — continue | wait | review
+todo:nudge-reset { source }                   — re-arm the completion nudge
 ```
 
 `subagent` emits per running child and `reminder-hook` per armed reminder.
 `todo` alone combines list, nudge de-duplication, and active waits into the
-settle disposition; gated-goal consumes it instead of duplicating todo logic.
+settle disposition; gated-goal consumes it instead of duplicating todo logic,
+and emits `todo:nudge-reset` whenever it sends the agent back to ACT, so each
+review iteration gets its own nudge instead of the list going unmentioned
+after the first.
 Gated-goal runs its reviewer on the subagent stack, so the reviewer shows up in
 `/subagents`, emits the same wait events, and inherits `PI_SUBAGENT_CHILD=1`
 (no sub-subagents). Split the bundle and both the wait-aware nudge and the
@@ -222,7 +230,10 @@ they follow whatever `pi` itself is using.
 [Pi](https://pi.dev) **0.84.1 or later**; the full kit was exercised
 end-to-end on **1.4.0** (Windows, RPC-supervised: two complete gated-goal
 loops with real reviewer rejections, reminder wake-ups, todo nudges, and MCP
-calls). Depends only on Pi's own runtime
+calls) and on **1.5.0** (macOS, TUI in an isolated tmux session: a reminder
+wake-up and a subagent completion held through one manual `/compact`, a
+reviewer verdict held through a second, a second todo nudge after reviewer
+feedback, exit `done`). Depends only on Pi's own runtime
 types (`@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`,
 `@earendil-works/pi-tui`, `typebox`) — no extra npm packages. Consumers do not
 need to install these; `pi` resolves them at load time.

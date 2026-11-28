@@ -63,7 +63,11 @@ not interrupt legitimate waits — and that applies to a *finished* list too: a
 completed run with something still pending reports `wait`, not `review`, so a
 workflow that reviews on completion (gated-goal) waits for the pending thing
 instead of reviewing an unfinished run. The de-dup signature prevents repeat nudges
-when nothing has changed since the last one. After each settle, todo publishes
+when nothing has changed since the last one. A workflow extension that hands you new
+work — gated-goal relaying reviewer feedback — re-arms that signature, so the same
+list can nudge you once more in a new iteration; when a message asks you to
+reconcile the list, do that first (mark finished items done, add the new work,
+drop what no longer applies). After each settle, todo publishes
 its shared disposition for workflow extensions: `continue` when it sent a
 nudge, `wait` while external work is active, or `review` when it scheduled no
 continuation. Consumers must reuse that disposition rather than duplicate
